@@ -1,20 +1,25 @@
 # generate_dataset.py
 # Synthetic Dataset Generation script using Omniverse Replicator
 
+import sys
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
 from isaacsim import SimulationApp
 import os
 
-# 1. Start the simulation application headless
-simulation_app = SimulationApp({"headless": True})
+# 1. Start the simulation application headless, enabling the asset converter extension at startup
+simulation_app = SimulationApp({
+    "headless": True,
+    "exts": {
+        "omni.kit.asset_converter": True
+    }
+})
 
 
 import sys
 import omni.usd
 import omni.replicator.core as rep
-
-# Enable the asset converter extension before importing it
-import omni.ext
-omni.ext.get_extension_manager().set_extension_enabled_immediate("omni.kit.asset_converter", True)
 import omni.kit.asset_converter
 
 # 2. Convert STL cart mesh to USD format
