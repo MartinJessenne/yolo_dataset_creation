@@ -8,18 +8,17 @@ sys.stderr.reconfigure(line_buffering=True)
 from isaacsim import SimulationApp
 import os
 
-# 1. Start the simulation application headless, enabling the asset converter extension at startup
-simulation_app = SimulationApp({
-    "headless": True,
-    "exts": {
-        "omni.kit.asset_converter": True
-    }
-})
+# 1. Start the simulation application headless
+simulation_app = SimulationApp({"headless": True})
 
 
 import sys
 import omni.usd
 import omni.replicator.core as rep
+
+# Enable the asset converter extension using Isaac Sim utility
+from omni.isaac.core.utils.extensions import enable_extension
+enable_extension("omni.kit.asset_converter")
 import omni.kit.asset_converter
 
 # 2. Convert STL cart mesh to USD format
