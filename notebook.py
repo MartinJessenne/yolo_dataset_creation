@@ -1,3 +1,11 @@
+# /// script
+# requires-python = "==3.12.*"
+# dependencies = [
+#     "marimo",
+#     "isaacsim[all, extscache]==6.0.0",
+# ]
+# ///
+
 import marimo as mo
     app = mo.App()
   
