@@ -8,8 +8,13 @@ import os
 simulation_app = SimulationApp({"headless": True})
 
 
+import sys
 import omni.usd
 import omni.replicator.core as rep
+
+# Enable the asset converter extension before importing it
+import omni.ext
+omni.ext.get_extension_manager().set_extension_enabled_immediate("omni.kit.asset_converter", True)
 import omni.kit.asset_converter
 
 # 2. Convert STL cart mesh to USD format
