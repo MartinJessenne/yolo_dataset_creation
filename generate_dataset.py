@@ -24,8 +24,9 @@ if not os.path.exists(cart_stl_path):
 # Programmatically run the asset converter
 if not os.path.exists(cart_usd_path):
     print(f">>> Converting {cart_stl_path} to USD...")
-    converter = omni.kit.asset_converter.AssetConverterContext()
-    task = omni.kit.asset_converter.AssetConverterTask(cart_stl_path, cart_usd_path)
+    converter_manager = omni.kit.asset_converter.get_instance()
+    context = omni.kit.asset_converter.AssetConverterContext()
+    task = converter_manager.create_converter_task(cart_stl_path, cart_usd_path, None, context)
     success = task.wait_until_finished()
     if not success:
         print("ERROR: Mesh conversion to USD failed.")
