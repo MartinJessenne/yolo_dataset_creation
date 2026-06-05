@@ -1,0 +1,17 @@
+[project]                                                                                      
+  name = "yolo_dataset_generation"                                                           
+  version = "0.1.0"                                                                              
+  description = "YOLOv12-seg & Isaac Sim workspace for cart pose estimation"                     
+  readme = "README.md"                                                                           
+  requires-python = ">=3.12,<3.13"                                                               
+  dependencies = [                                                                               
+      "marimo>=0.10.0",                                                                          
+      "isaacsim[all,extscache]==6.0.0",                                                          
+      "numpy<2.0.0",                                                                             
+  ]                                                                                              
+                                                                                                 
+  # Configure the NVIDIA extra index URL persistently inside the project                         
+  [[tool.uv.index]]                                                                              
+  name = "nvidia"                                                                                
+  url = "https://pypi.nvidia.com"                                                                
+  explicit = false # Allows uv to fallback/search this index for packages like isaacsim
