@@ -21,22 +21,22 @@ from omni.isaac.core.utils.extensions import enable_extension
 enable_extension("omni.kit.asset_converter")
 import omni.kit.asset_converter
 
-# 2. Convert STL cart mesh to USD format
-cart_stl_path = os.path.abspath("./meshes/colruyt_cart.stl")
-cart_usd_path = os.path.abspath("./meshes/colruyt_cart.usd")
+# 2. Convert DAE cart mesh to USD format
+cart_dae_path = os.path.abspath("./meshes/picanolcart.dae")
+cart_usd_path = os.path.abspath("./meshes/picanolcart.usd")
 
-if not os.path.exists(cart_stl_path):
-    print(f"\nERROR: Cart STL mesh not found at {cart_stl_path}.")
-    print("Please make sure you have copied colruyt_cart.stl to the ./meshes/ directory.")
+if not os.path.exists(cart_dae_path):
+    print(f"\nERROR: Cart DAE mesh not found at {cart_dae_path}.")
+    print("Please make sure you have picanolcart.dae in the ./meshes/ directory.")
     simulation_app.close()
     exit(1)
 
 # Programmatically run the asset converter
 if not os.path.exists(cart_usd_path):
-    print(f">>> Converting {cart_stl_path} to USD...")
+    print(f">>> Converting {cart_dae_path} to USD...")
     converter_manager = omni.kit.asset_converter.get_instance()
     context = omni.kit.asset_converter.AssetConverterContext()
-    task = converter_manager.create_converter_task(cart_stl_path, cart_usd_path, None, context)
+    task = converter_manager.create_converter_task(cart_dae_path, cart_usd_path, None, context)
     
     import asyncio
     # Schedule the task on the event loop and pump the application loop until done

@@ -42,8 +42,8 @@ print("\n>>> Bounding Boxes of meshes:")
 for prim in stage.Traverse():
     if prim.IsA(UsdGeom.Mesh) or prim.IsA(UsdGeom.Xform):
         geom_prim = UsdGeom.Imageable(prim)
-        # Compute bounding box in local space, specifying the "default" purpose explicitly
-        bbox = geom_prim.ComputeLocalBound(Usd.TimeCode.Default(), ["default"])
+        # Compute bounding box in local space, passing the string "default" directly
+        bbox = geom_prim.ComputeLocalBound(Usd.TimeCode.Default(), "default")
         box_range = bbox.GetRange()
         if not box_range.IsEmpty():
             size = box_range.GetMax() - box_range.GetMin()
