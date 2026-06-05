@@ -1,11 +1,24 @@
 # generate_dataset.py
 # Synthetic Dataset Generation script using Omniverse Replicator
 
+import sys
+import types
+import warp
+
+# Compatibility shim: Isaac Sim's Replicator expects 'warp.context' (Warp 1.12),
+# but Warp 1.15 (which we use for Blackwell support) deprecated and removed it.
+# We dynamically inject a mock 'warp.context' module to bridge the gap.
+context_module = types.ModuleType("warp.context")
+context_module.Kernel = warp.Kernel
+sys.modules["warp.context"] = context_module
+warp.context = context_module
+
 from isaacsim import SimulationApp
 import os
 
 # 1. Start the simulation application headless
 simulation_app = SimulationApp({"headless": True})
+
 
 import omni.usd
 import omni.replicator.core as rep
