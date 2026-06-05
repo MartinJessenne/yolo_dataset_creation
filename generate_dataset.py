@@ -37,7 +37,14 @@ if not os.path.exists(cart_usd_path):
     converter_manager = omni.kit.asset_converter.get_instance()
     context = omni.kit.asset_converter.AssetConverterContext()
     task = converter_manager.create_converter_task(cart_stl_path, cart_usd_path, None, context)
-    success = task.wait_until_finished()
+    
+    import asyncio
+    # Schedule the task on the event loop and pump the application loop until done
+    future = asyncio.ensure_future(task.wait_until_finished())
+    while not future.done():
+        simulation_app.update()
+        
+    success = future.result()
     if not success:
         print("ERROR: Mesh conversion to USD failed.")
         simulation_app.close()
@@ -67,9 +74,12 @@ with rep.new_layer():
     render_product = rep.create.render_product(camera, resolution=(640, 640))
     
     # Configure the output writer (saving RGB images and Semantic Segmentation masks)
+    output_directory = os.path.abspath("./_output_dataset")
+    print(f">>> Configured dataset output directory: {output_directory}")
+    
     writer = rep.writers.get("BasicWriter")
     writer.initialize(
-        output_dir="_output_dataset",
+        output_dir=output_directory,
         rgb=True,
         semantic_segmentation=True
     )
@@ -78,7 +88,16 @@ with rep.new_layer():
     # Run the orchestrator to capture 5 frames for validation
     print(">>> Starting synthetic generation...")
     rep.orchestrator.run(num_frames=5)
-    print(">>> Generation finished. Datasets saved to ./_output_dataset")
+    
+    # Wait until orchestrator starts and finishes
+    while not rep.orchestrator.get_is_started():
+        simulation_app.update()
+    while rep.orchestrator.get_is_started():
+        simulation_app.update()
+        
+    print(">>> Generation finished. Waiting for disk dispatch...")
+    rep.BackendDispatch.wait_until_done()
+    print(f">>> Datasets saved successfully to {output_directory}")
 
 # Close the application
 simulation_app.close()
