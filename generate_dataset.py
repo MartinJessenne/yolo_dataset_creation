@@ -133,7 +133,7 @@ with rep.new_layer():
     # Register the randomizer and connect it to the frame trigger
     rep.randomizer.register(randomize_scene)
 
-    with rep.trigger.on_frame():
+    with rep.trigger.on_frame(num_frames=5):
         rep.randomizer.randomize_scene()
 
     render_product = rep.create.render_product(camera, resolution=(1280, 800))
@@ -153,13 +153,15 @@ with rep.new_layer():
     )
     writer.attach([render_product])
     
-    # Run the orchestrator manually using step() to ensure frame-by-frame updates tick synchronously.
-    # Standalone headless scripts can fail to advance the timeline with orchestrator.run().
+    # Run the orchestrator to capture 5 frames for validation
     print(">>> Starting synthetic generation...")
-    for frame_idx in range(5):
-        print(f">>> Rendering frame {frame_idx + 1}/5...")
+    rep.orchestrator.run(num_frames=5)
+    
+    # Wait until orchestrator starts and finishes
+    while not rep.orchestrator.get_is_started():
         simulation_app.update()
-        rep.orchestrator.step()
+    while rep.orchestrator.get_is_started():
+        simulation_app.update()
         
     print(">>> Generation finished. Waiting for disk dispatch...")
     rep.BackendDispatch.wait_until_done()
