@@ -18,13 +18,16 @@ import sys
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
+# Disable RTX driver verification check for driver compatibility on daman host
+sys.argv.append("--/rtx/verifyDriverVersion/enabled=false")
+
 import os
 from isaacsim import SimulationApp
 
 # ── 1. Boot Isaac Sim headless ────────────────────────────────────────────────
 simulation_app = SimulationApp({"headless": True})
 
-from omni.isaac.core.utils.extensions import enable_extension
+from isaacsim.core.utils.extensions import enable_extension
 from pxr import Usd, UsdGeom
 
 # ── 2. Enable the asset converter extension ───────────────────────────────────

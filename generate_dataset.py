@@ -5,6 +5,9 @@ import sys
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
+# Disable RTX driver verification check for driver compatibility on daman host
+sys.argv.append("--/rtx/verifyDriverVersion/enabled=false")
+
 from isaacsim import SimulationApp
 import os
 
@@ -28,10 +31,10 @@ except Exception as e:
 import sys
 import omni.usd
 import omni.replicator.core as rep
-from omni.isaac.core.utils.semantics import add_update_semantics
+from isaacsim.core.utils.semantics import add_labels
 
 # Enable the asset converter extension using Isaac Sim utility
-from omni.isaac.core.utils.extensions import enable_extension
+from isaacsim.core.utils.extensions import enable_extension
 enable_extension("omni.kit.asset_converter")
 import omni.kit.asset_converter
 
@@ -66,7 +69,7 @@ if not os.path.exists(cart_usd_path):
     print(">>> Mesh conversion completed successfully.")
 
 # 3. Open NVIDIA's hosted Simple Warehouse USD scene
-from omni.isaac.core.utils.nucleus import get_assets_root_path
+from isaacsim.core.utils.nucleus import get_assets_root_path
 assets_root_path = get_assets_root_path()
 if assets_root_path:
     ISAAC_ASSETS = f"{assets_root_path}/Isaac"
@@ -104,7 +107,7 @@ with rep.new_layer():
     for prim in stage.Traverse():
         label = CART_SEMANTIC_MAP.get(prim.GetName())
         if label:
-            add_update_semantics(prim, label, "class")
+            add_labels(prim, [label], "class")
             print(f">>> Semantic applied: '{label}' → {prim.GetPath()}")
     
     # ── Ensure the renderer re-converges between randomized frames ─────────────
