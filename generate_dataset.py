@@ -153,15 +153,13 @@ with rep.new_layer():
     )
     writer.attach([render_product])
     
-    # Run the orchestrator to capture 5 frames for validation
+    # Run the orchestrator manually using step() to ensure frame-by-frame updates tick synchronously.
+    # Standalone headless scripts can fail to advance the timeline with orchestrator.run().
     print(">>> Starting synthetic generation...")
-    rep.orchestrator.run(num_frames=5)
-    
-    # Wait until orchestrator starts and finishes
-    while not rep.orchestrator.get_is_started():
+    for frame_idx in range(5):
+        print(f">>> Rendering frame {frame_idx + 1}/5...")
         simulation_app.update()
-    while rep.orchestrator.get_is_started():
-        simulation_app.update()
+        rep.orchestrator.step()
         
     print(">>> Generation finished. Waiting for disk dispatch...")
     rep.BackendDispatch.wait_until_done()
