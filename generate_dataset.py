@@ -84,15 +84,54 @@ with rep.new_layer():
             print(f">>> Semantic applied: '{label}' → {prim.GetPath()}")
     
     with cart:
-        # Randomize cart position and orientation on the warehouse floor
+        # Cart sits on the floor: Z=0 always.
+        # X/Y randomized across a wide area to produce varied viewpoints.
+        # Rotation only around Z (yaw) since the cart never tilts on flat floor.
         rep.modify.pose(
-            position=rep.distribution.uniform((-3.0, -3.0, 0.0), (3.0, 3.0, 0.0)),
-            rotation=rep.distribution.uniform((0, 0, 0), (0, 0, 360))
+            position=rep.distribution.uniform((-4.0, -4.0, 0.0), (4.0, 4.0, 0.0)),
+            rotation=rep.distribution.uniform((0, 0, 0), (0, 0, 360)),
         )
-        
-    # Create a camera pointing at the cart
-    camera = rep.create.camera(position=(0, -6, 2.5), look_at=cart)
-    render_product = rep.create.render_product(camera, resolution=(640, 640))
+
+    # ── Lighting Randomization ──────────────────────────────────────────────────
+    # Create randomized dome (ambient) and distant (sunlight/spotlight) lights
+    # to simulate different facility light levels, temperatures, and shadow angles.
+    domelight = rep.create.light(
+        light_type="dome",
+        intensity=rep.distribution.uniform(100.0, 2500.0),
+        color=rep.distribution.uniform((0.5, 0.5, 0.5), (1.0, 1.0, 1.0))
+    )
+    distantlight = rep.create.light(
+        light_type="distant",
+        intensity=rep.distribution.uniform(1000.0, 5000.0),
+        color=rep.distribution.uniform((0.6, 0.6, 0.6), (1.0, 1.0, 1.0)),
+        rotation=rep.distribution.uniform((0, 0, 0), (360, 360, 360))
+    )
+
+    # ── Robot-calibrated camera ───────────────────────────────────────────────
+    # Real ATR2 specs (tf2_echo base_link stereo_camera_color_optical_frame):
+    #   Z = 0.304 m (locked – real robot mount height)
+    #   XY randomized to simulate approach from any direction at any distance
+    CAMERA_HEIGHT = 0.304  # metres
+
+    # NOTE: focal_length is derived from the Gazebo simulated D455i color camera HFOV (90°):
+    #   f = horizontal_aperture / (2 * tan(HFOV/2))
+    #     = 20.955 / (2 * tan(45°)) = 10.4775 mm
+    # This matches the simulation camera intrinsics (fx = fy = 639.99768 on 1280x800 resolution)
+    camera = rep.create.camera(
+        focal_length=10.4775,        # mm – matches Gazebo color 90° HFOV
+        horizontal_aperture=20.955,  # mm – standard 1" sensor default
+        look_at=cart,
+    )
+    with camera:
+        rep.modify.pose(
+            # Z is clamped to real robot height; XY sweeps a 9m × 9m arena
+            position=rep.distribution.uniform(
+                (-4.5, -4.5, CAMERA_HEIGHT),
+                ( 4.5,  4.5, CAMERA_HEIGHT),
+            ),
+            look_at=cart,  # auto-computes correct pitch toward cart centroid
+        )
+    render_product = rep.create.render_product(camera, resolution=(1280, 800))
     
     # Configure the output writer (saving RGB images and Semantic Segmentation masks)
     output_directory = os.path.abspath("./_output_dataset")
@@ -103,6 +142,7 @@ with rep.new_layer():
         output_dir=output_directory,
         rgb=True,
         semantic_segmentation=True,
+        distance_to_image_plane=True, # Enable depth map generation (meters, float32, .npy)
         bounding_box_3d=True,    # 3D OBB corners + world transform → 6D pose GT
         camera_params=True,      # Intrinsics K per frame (needed for projection)
     )
