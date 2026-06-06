@@ -67,6 +67,9 @@ CART_SEMANTIC_MAP = {
     "right_handle": "right_handle",
 }
 
+# Define output directory at module scope (needed after new_layer block exits)
+output_directory = os.path.abspath("./_output_dataset")
+
 with rep.new_layer():
     # Load cart USD (no top-level semantics – applied per-prim below)
     cart = rep.create.from_usd(cart_usd_path)
@@ -133,18 +136,17 @@ with rep.new_layer():
             rep.modify.attribute("inputs:intensity", rep.distribution.uniform(1000.0, 5000.0))
             rep.modify.attribute("inputs:color", rep.distribution.uniform((0.6, 0.6, 0.6), (1.0, 1.0, 1.0)))
             rep.modify.pose(rotation=rep.distribution.uniform((0, 0, 0), (360, 360, 360)))
-        return [cart.node, camera.node, domelight.node, distantlight.node]
+        return cart.node
 
     # Register the randomizer and connect it to the frame trigger
     rep.randomizer.register(randomize_scene)
 
-    with rep.trigger.on_frame(num_frames=5):
+    with rep.trigger.on_frame(max_execs=5):
         rep.randomizer.randomize_scene()
 
     render_product = rep.create.render_product(camera, resolution=(1280, 800))
     
     # Configure the output writer (saving RGB images and Semantic Segmentation masks)
-    output_directory = os.path.abspath("./_output_dataset")
     print(f">>> Configured dataset output directory: {output_directory}")
     
     writer = rep.writers.get("BasicWriter")
