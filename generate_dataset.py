@@ -15,6 +15,7 @@ simulation_app = SimulationApp({"headless": True})
 import sys
 import omni.usd
 import omni.replicator.core as rep
+from omni.isaac.core.utils.semantics import add_update_semantics
 
 # Enable the asset converter extension using Isaac Sim utility
 from omni.isaac.core.utils.extensions import enable_extension
@@ -58,10 +59,29 @@ omni.usd.get_context().open_stage(warehouse_url)
 
 # 4. Set up the Replicator generation pipeline
 print(">>> Initializing Replicator pipeline...")
+# Part name → semantic class label mapping
+# Must match the Blender object names used in the USD export.
+CART_SEMANTIC_MAP = {
+    "cart_body":    "cart_body",
+    "left_handle":  "left_handle",
+    "right_handle": "right_handle",
+}
+
 with rep.new_layer():
-    # Load cart USD. Semantic labels (cart_body / left_handle / right_handle)
-    # are pre-baked per-prim by apply_semantics.py – no top-level override needed.
+    # Load cart USD (no top-level semantics – applied per-prim below)
     cart = rep.create.from_usd(cart_usd_path)
+
+    # Pump the app once so the USD reference is fully resolved in the stage
+    simulation_app.update()
+
+    # Apply per-prim semantics as local stage opinions (required by the
+    # Replicator annotator – pre-baked USD attributes are not sufficient).
+    stage = omni.usd.get_context().get_stage()
+    for prim in stage.Traverse():
+        label = CART_SEMANTIC_MAP.get(prim.GetName())
+        if label:
+            add_update_semantics(prim, label, "class")
+            print(f">>> Semantic applied: '{label}' → {prim.GetPath()}")
     
     with cart:
         # Randomize cart position and orientation on the warehouse floor
