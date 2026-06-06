@@ -83,6 +83,11 @@ with rep.new_layer():
             add_update_semantics(prim, label, "class")
             print(f">>> Semantic applied: '{label}' → {prim.GetPath()}")
     
+    # ── Ensure the renderer re-converges between randomized frames ─────────────
+    # Without RTSubframes, the render product may capture stale (pre-randomization)
+    # frames, producing identical images across all generated frames.
+    rep.settings.carb_settings("/omni/replicator/RTSubframes", 4)
+
     # ── Create Scene Primitives ────────────────────────────────────────────────
     # Initialize camera, dome (ambient) light, and distant (directional) light.
     # We create them once here and then randomize their attributes every frame.
@@ -152,20 +157,23 @@ with rep.new_layer():
         camera_params=True,      # Intrinsics K per frame (needed for projection)
     )
     writer.attach([render_product])
-    
-    # Run the orchestrator to capture 5 frames for validation
-    print(">>> Starting synthetic generation...")
-    rep.orchestrator.run(num_frames=5)
-    
-    # Wait until orchestrator starts and finishes
-    while not rep.orchestrator.get_is_started():
-        simulation_app.update()
-    while rep.orchestrator.get_is_started():
-        simulation_app.update()
-        
-    print(">>> Generation finished. Waiting for disk dispatch...")
-    rep.BackendDispatch.wait_until_done()
-    print(f">>> Datasets saved successfully to {output_directory}")
+
+# ── Execute generation OUTSIDE the new_layer block ────────────────────────────
+# The graph must be fully defined (layer sealed) before the orchestrator runs.
+# num_frames is controlled solely by on_frame(num_frames=5) above;
+# orchestrator.run() with no args stops when all triggers are exhausted.
+print(">>> Starting synthetic generation...")
+rep.orchestrator.run()
+
+# Wait until orchestrator starts and finishes
+while not rep.orchestrator.get_is_started():
+    simulation_app.update()
+while rep.orchestrator.get_is_started():
+    simulation_app.update()
+
+print(">>> Generation finished. Waiting for disk dispatch...")
+rep.BackendDispatch.wait_until_done()
+print(f">>> Datasets saved successfully to {output_directory}")
 
 # Close the application
 simulation_app.close()
