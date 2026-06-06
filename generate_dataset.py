@@ -59,8 +59,9 @@ omni.usd.get_context().open_stage(warehouse_url)
 # 4. Set up the Replicator generation pipeline
 print(">>> Initializing Replicator pipeline...")
 with rep.new_layer():
-    # Load cart USD and assign class semantic for segmentation mask labeling
-    cart = rep.create.from_usd(cart_usd_path, semantics=[("class", "industrial_cart")])
+    # Load cart USD. Semantic labels (cart_body / left_handle / right_handle)
+    # are pre-baked per-prim by apply_semantics.py – no top-level override needed.
+    cart = rep.create.from_usd(cart_usd_path)
     
     with cart:
         # Randomize cart position and orientation on the warehouse floor
@@ -81,7 +82,9 @@ with rep.new_layer():
     writer.initialize(
         output_dir=output_directory,
         rgb=True,
-        semantic_segmentation=True
+        semantic_segmentation=True,
+        bounding_box_3d=True,    # 3D OBB corners + world transform → 6D pose GT
+        camera_params=True,      # Intrinsics K per frame (needed for projection)
     )
     writer.attach([render_product])
     
