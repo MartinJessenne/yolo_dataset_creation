@@ -11,6 +11,19 @@ import os
 # 1. Start the simulation application headless
 simulation_app = SimulationApp({"headless": True})
 
+# Inject compatibility shim for Warp 1.15+ (required by Replicator in older configurations)
+import types
+try:
+    import warp
+    if not hasattr(warp, "context"):
+        context_module = types.ModuleType("warp.context")
+        context_module.Kernel = warp.Kernel
+        sys.modules["warp.context"] = context_module
+        warp.context = context_module
+        print(">>> Warp context compatibility shim successfully applied.")
+except Exception as e:
+    print(f">>> Warp context check: {e}")
+
 
 import sys
 import omni.usd
@@ -53,7 +66,15 @@ if not os.path.exists(cart_usd_path):
     print(">>> Mesh conversion completed successfully.")
 
 # 3. Open NVIDIA's hosted Simple Warehouse USD scene
-warehouse_url = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.0/Isaac/Environments/Simple_Warehouse/warehouse.usd"
+from omni.isaac.core.utils.nucleus import get_assets_root_path
+assets_root_path = get_assets_root_path()
+if assets_root_path:
+    ISAAC_ASSETS = f"{assets_root_path}/Isaac"
+else:
+    # Fallback to public S3 bucket for version 6.0
+    ISAAC_ASSETS = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0/Isaac"
+
+warehouse_url = f"{ISAAC_ASSETS}/Environments/Simple_Warehouse/warehouse.usd"
 print(f">>> Loading warehouse environment from: {warehouse_url}")
 omni.usd.get_context().open_stage(warehouse_url)
 
@@ -110,6 +131,29 @@ with rep.new_layer():
     # ── Robot-calibrated camera height parameter ──────────────────────────────
     CAMERA_HEIGHT = 0.304  # metres
 
+    # ── Load warehouse clutter props (distractors, no semantics) ──────────────
+    # Props from the same Isaac 4.0 S3 content server used for the warehouse.
+    PROPS_BASE = f"{ISAAC_ASSETS}/Environments/Simple_Warehouse/Props"
+    prop_urls = [
+        f"{PROPS_BASE}/SM_PaletteA_01.usd",
+        f"{PROPS_BASE}/SM_CardBoxD_04.usd",
+        f"{PROPS_BASE}/S_TrafficCone.usd",
+    ]
+    print(">>> Loading warehouse clutter props...")
+    clutter_prims = []
+    for url in prop_urls:
+        # Load 2 instances of each prop for denser scenes
+        for i in range(2):
+            prim = rep.create.from_usd(url)
+            clutter_prims.append(prim)
+            print(f">>> Loaded clutter prop: {url} (instance {i})")
+    clutter_group = rep.create.group(clutter_prims)
+
+    # ── Look-at target xform (invisible) for de-centering the cart ────────────
+    # Instead of look_at=cart (always dead-centre), the camera will look at this
+    # target, whose position is randomized near — but not exactly at — the cart.
+    look_at_target = rep.create.xform(name="look_at_target")
+
     # ── Define Frame Randomizer Function ───────────────────────────────────────
     # Evaluates distributions and updates poses/attributes on every frame trigger.
     def randomize_scene():
@@ -121,6 +165,13 @@ with rep.new_layer():
                 position=rep.distribution.uniform((-4.0, -4.0, 0.0), (4.0, 4.0, 0.0)),
                 rotation=rep.distribution.uniform((0, 0, 0), (0, 0, 360)),
             )
+        # ── De-centred look-at target ─────────────────────────────────────────
+        # Random offset from cart centroid (±1.5m XY, slight Z variation)
+        # so the cart appears off-centre in the frame — more realistic framing.
+        with look_at_target:
+            rep.modify.pose(
+                position=rep.distribution.uniform((-1.5, -1.5, -0.1), (1.5, 1.5, 0.3)),
+            )
         with camera:
             rep.modify.pose(
                 # Z is clamped to real robot height; XY sweeps a 9m × 9m arena
@@ -128,7 +179,13 @@ with rep.new_layer():
                     (-4.5, -4.5, CAMERA_HEIGHT),
                     ( 4.5,  4.5, CAMERA_HEIGHT),
                 ),
-                look_at=cart,  # auto-computes correct pitch toward cart centroid
+                look_at=look_at_target,
+            )
+        # ── Scatter clutter props across the warehouse floor ──────────────────
+        with clutter_group:
+            rep.modify.pose(
+                position=rep.distribution.uniform((-5.0, -5.0, 0.0), (5.0, 5.0, 0.0)),
+                rotation=rep.distribution.uniform((0, 0, 0), (0, 0, 360)),
             )
         with domelight:
             rep.modify.attribute("inputs:intensity", rep.distribution.uniform(100.0, 2500.0))
