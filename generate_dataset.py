@@ -83,36 +83,12 @@ with rep.new_layer():
             add_update_semantics(prim, label, "class")
             print(f">>> Semantic applied: '{label}' → {prim.GetPath()}")
     
-    with cart:
-        # Cart sits on the floor: Z=0 always.
-        # X/Y randomized across a wide area to produce varied viewpoints.
-        # Rotation only around Z (yaw) since the cart never tilts on flat floor.
-        rep.modify.pose(
-            position=rep.distribution.uniform((-4.0, -4.0, 0.0), (4.0, 4.0, 0.0)),
-            rotation=rep.distribution.uniform((0, 0, 0), (0, 0, 360)),
-        )
-
-    # ── Lighting Randomization ──────────────────────────────────────────────────
-    # Create randomized dome (ambient) and distant (sunlight/spotlight) lights
-    # to simulate different facility light levels, temperatures, and shadow angles.
-    domelight = rep.create.light(
-        light_type="dome",
-        intensity=rep.distribution.uniform(100.0, 2500.0),
-        color=rep.distribution.uniform((0.5, 0.5, 0.5), (1.0, 1.0, 1.0))
-    )
-    distantlight = rep.create.light(
-        light_type="distant",
-        intensity=rep.distribution.uniform(1000.0, 5000.0),
-        color=rep.distribution.uniform((0.6, 0.6, 0.6), (1.0, 1.0, 1.0)),
-        rotation=rep.distribution.uniform((0, 0, 0), (360, 360, 360))
-    )
-
-    # ── Robot-calibrated camera ───────────────────────────────────────────────
-    # Real ATR2 specs (tf2_echo base_link stereo_camera_color_optical_frame):
-    #   Z = 0.304 m (locked – real robot mount height)
-    #   XY randomized to simulate approach from any direction at any distance
-    CAMERA_HEIGHT = 0.304  # metres
-
+    # ── Create Scene Primitives ────────────────────────────────────────────────
+    # Initialize camera, dome (ambient) light, and distant (directional) light.
+    # We create them once here and then randomize their attributes every frame.
+    domelight = rep.create.light(light_type="dome")
+    distantlight = rep.create.light(light_type="distant")
+    
     # NOTE: focal_length is derived from the Gazebo simulated D455i color camera HFOV (90°):
     #   f = horizontal_aperture / (2 * tan(HFOV/2))
     #     = 20.955 / (2 * tan(45°)) = 10.4775 mm
@@ -120,17 +96,46 @@ with rep.new_layer():
     camera = rep.create.camera(
         focal_length=10.4775,        # mm – matches Gazebo color 90° HFOV
         horizontal_aperture=20.955,  # mm – standard 1" sensor default
-        look_at=cart,
     )
-    with camera:
-        rep.modify.pose(
-            # Z is clamped to real robot height; XY sweeps a 9m × 9m arena
-            position=rep.distribution.uniform(
-                (-4.5, -4.5, CAMERA_HEIGHT),
-                ( 4.5,  4.5, CAMERA_HEIGHT),
-            ),
-            look_at=cart,  # auto-computes correct pitch toward cart centroid
-        )
+    
+    # ── Robot-calibrated camera height parameter ──────────────────────────────
+    CAMERA_HEIGHT = 0.304  # metres
+
+    # ── Define Frame Randomizer Function ───────────────────────────────────────
+    # Evaluates distributions and updates poses/attributes on every frame trigger.
+    def randomize_scene():
+        with cart:
+            # Cart sits on the floor: Z=0 always.
+            # X/Y randomized across a wide area to produce varied viewpoints.
+            # Rotation only around Z (yaw) since the cart never tilts on flat floor.
+            rep.modify.pose(
+                position=rep.distribution.uniform((-4.0, -4.0, 0.0), (4.0, 4.0, 0.0)),
+                rotation=rep.distribution.uniform((0, 0, 0), (0, 0, 360)),
+            )
+        with camera:
+            rep.modify.pose(
+                # Z is clamped to real robot height; XY sweeps a 9m × 9m arena
+                position=rep.distribution.uniform(
+                    (-4.5, -4.5, CAMERA_HEIGHT),
+                    ( 4.5,  4.5, CAMERA_HEIGHT),
+                ),
+                look_at=cart,  # auto-computes correct pitch toward cart centroid
+            )
+        with domelight:
+            rep.modify.attribute("inputs:intensity", rep.distribution.uniform(100.0, 2500.0))
+            rep.modify.attribute("inputs:color", rep.distribution.uniform((0.5, 0.5, 0.5), (1.0, 1.0, 1.0)))
+        with distantlight:
+            rep.modify.attribute("inputs:intensity", rep.distribution.uniform(1000.0, 5000.0))
+            rep.modify.attribute("inputs:color", rep.distribution.uniform((0.6, 0.6, 0.6), (1.0, 1.0, 1.0)))
+            rep.modify.pose(rotation=rep.distribution.uniform((0, 0, 0), (360, 360, 360)))
+        return [cart.node, camera.node, domelight.node, distantlight.node]
+
+    # Register the randomizer and connect it to the frame trigger
+    rep.randomizer.register(randomize_scene)
+
+    with rep.trigger.on_frame():
+        rep.randomizer.randomize_scene()
+
     render_product = rep.create.render_product(camera, resolution=(1280, 800))
     
     # Configure the output writer (saving RGB images and Semantic Segmentation masks)
