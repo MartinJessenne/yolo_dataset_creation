@@ -104,6 +104,7 @@ with rep.new_layer():
     camera = rep.create.camera(
         focal_length=10.4775,        # mm – matches Gazebo color 90° HFOV
         horizontal_aperture=20.955,  # mm – standard 1" sensor default
+        clipping_range=(0.1, 10000.0),  # near=10cm prevents floor-clipping at low camera height
     )
     
     # ── Robot-calibrated camera height parameter ──────────────────────────────
