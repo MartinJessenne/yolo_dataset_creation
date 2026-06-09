@@ -109,7 +109,7 @@ output_directory = os.path.abspath(f"./_output_dataset_{CART_TYPE}")
 
 # Generate constrained camera/cart coordinates for the sequences
 import random
-import numpy as np
+import math
 
 # Camera geometry constants
 CAMERA_HEIGHT = 0.304  # meters
@@ -136,30 +136,30 @@ for _ in range(NUM_FRAMES):
     alpha = random.uniform(-45.0, 45.0)
     
     # Cart faces local X+. Camera is placed in front at distance d, angle alpha.
-    alpha_rad = np.radians(alpha)
-    local_x = d * np.cos(alpha_rad)
-    local_y = d * np.sin(alpha_rad)
+    alpha_rad = math.radians(alpha)
+    local_x = d * math.cos(alpha_rad)
+    local_y = d * math.sin(alpha_rad)
     
     # Rotate local offset by cart yaw:
-    cyaw_rad = np.radians(cyaw)
-    wx = cx + local_x * np.cos(cyaw_rad) - local_y * np.sin(cyaw_rad)
-    wy = cy + local_x * np.sin(cyaw_rad) + local_y * np.cos(cyaw_rad)
+    cyaw_rad = math.radians(cyaw)
+    wx = cx + local_x * math.cos(cyaw_rad) - local_y * math.sin(cyaw_rad)
+    wy = cy + local_x * math.sin(cyaw_rad) + local_y * math.cos(cyaw_rad)
     wz = CAMERA_HEIGHT
-    camera_positions.append((wx, wy, wz))
+    camera_positions.append((float(wx), float(wy), float(wz)))
     
     # 4. Look-at target:
     # Camera has a fixed pitch tilt of 30 degrees upward, pointing at height:
-    target_z = CAMERA_HEIGHT + d * np.tan(np.radians(TILT_ANGLE))
+    target_z = CAMERA_HEIGHT + d * math.tan(math.radians(TILT_ANGLE))
     
     # Add small random offsets (de-centering) to make the target robust
     offset_x = random.uniform(-0.1, 0.1)
     offset_y = random.uniform(-0.1, 0.1)
     offset_z = random.uniform(-0.05, 0.05)
     
-    tx = cx + offset_x * np.cos(cyaw_rad) - offset_y * np.sin(cyaw_rad)
-    ty = cy + offset_x * np.sin(cyaw_rad) + offset_y * np.cos(cyaw_rad)
+    tx = cx + offset_x * math.cos(cyaw_rad) - offset_y * math.sin(cyaw_rad)
+    ty = cy + offset_x * math.sin(cyaw_rad) + offset_y * math.cos(cyaw_rad)
     tz = target_z + offset_z
-    look_at_positions.append((tx, ty, tz))
+    look_at_positions.append((float(tx), float(ty), float(tz)))
 
 with rep.new_layer():
     # Load cart USD (no top-level semantics – applied per-prim below)
