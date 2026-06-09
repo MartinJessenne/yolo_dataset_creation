@@ -1,12 +1,41 @@
 # generate_dataset.py
 # Synthetic Dataset Generation script using Omniverse Replicator
 
+import os
 import sys
+
+# Disable Omniverse Hub (OmniHub) daemon to prevent connection loops in container
+os.environ["OMNICLIENT_HUB_MODE"] = "disabled"
+os.environ["OMNICLIENT_USE_HUB"] = "0"
+
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
 # Disable RTX driver verification check for driver compatibility on daman host
 sys.argv.append("--/rtx/verifyDriverVersion/enabled=false")
+
+# Parse custom command-line arguments before SimulationApp consumes them
+CART_TYPE = "picanol"
+if "--cart" in sys.argv:
+    try:
+        idx = sys.argv.index("--cart")
+        if idx + 1 < len(sys.argv):
+            CART_TYPE = sys.argv[idx + 1].lower()
+        sys.argv.pop(idx + 1)
+        sys.argv.pop(idx)
+    except ValueError:
+        pass
+
+NUM_FRAMES = 5  # default/validation run
+if "--frames" in sys.argv:
+    try:
+        idx = sys.argv.index("--frames")
+        if idx + 1 < len(sys.argv):
+            NUM_FRAMES = int(sys.argv[idx + 1])
+        sys.argv.pop(idx + 1)
+        sys.argv.pop(idx)
+    except ValueError:
+        pass
 
 from isaacsim import SimulationApp
 import os
@@ -38,38 +67,21 @@ from isaacsim.core.utils.extensions import enable_extension
 enable_extension("omni.kit.asset_converter")
 import omni.kit.asset_converter
 
-# 2. Convert DAE cart mesh to USD format
-cart_dae_path = os.path.abspath("./meshes/picanolcart.dae")
-cart_usd_path = os.path.abspath("./meshes/picanolcart.usd")
+# 2. Resolve target USD cart model path
+if CART_TYPE == "colruyt":
+    cart_usd_path = os.path.abspath("./meshes/colruyt.usd")
+else:
+    cart_usd_path = os.path.abspath("./meshes/picanolcart.usd")
 
-if not os.path.exists(cart_dae_path):
-    print(f"\nERROR: Cart DAE mesh not found at {cart_dae_path}.")
-    print("Please make sure you have picanolcart.dae in the ./meshes/ directory.")
+if not os.path.exists(cart_usd_path):
+    print(f"\nERROR: Pre-processed USD model not found at {cart_usd_path}.")
+    print("Please run 'apply_semantics.py' first to generate the labeled USD files.")
     simulation_app.close()
     exit(1)
-
-# Programmatically run the asset converter
-if not os.path.exists(cart_usd_path):
-    print(f">>> Converting {cart_dae_path} to USD...")
-    converter_manager = omni.kit.asset_converter.get_instance()
-    context = omni.kit.asset_converter.AssetConverterContext()
-    task = converter_manager.create_converter_task(cart_dae_path, cart_usd_path, None, context)
-    
-    import asyncio
-    # Schedule the task on the event loop and pump the application loop until done
-    future = asyncio.ensure_future(task.wait_until_finished())
-    while not future.done():
-        simulation_app.update()
-        
-    success = future.result()
-    if not success:
-        print("ERROR: Mesh conversion to USD failed.")
-        simulation_app.close()
-        exit(1)
-    print(">>> Mesh conversion completed successfully.")
+print(f">>> Loaded target USD model: {cart_usd_path}")
 
 # 3. Open NVIDIA's hosted Simple Warehouse USD scene
-from isaacsim.core.utils.nucleus import get_assets_root_path
+from isaacsim.storage.native import get_assets_root_path
 assets_root_path = get_assets_root_path()
 if assets_root_path:
     ISAAC_ASSETS = f"{assets_root_path}/Isaac"
@@ -89,10 +101,65 @@ CART_SEMANTIC_MAP = {
     "cart_body":    "cart_body",
     "left_handle":  "left_handle",
     "right_handle": "right_handle",
+    "colruyt_cart": "cart_body",
 }
 
 # Define output directory at module scope (needed after new_layer block exits)
-output_directory = os.path.abspath("./_output_dataset")
+output_directory = os.path.abspath(f"./_output_dataset_{CART_TYPE}")
+
+# Generate constrained camera/cart coordinates for the sequences
+import random
+import numpy as np
+
+# Camera geometry constants
+CAMERA_HEIGHT = 0.304  # meters
+TILT_ANGLE = 30.0      # degrees (pitch tilt upward)
+
+cart_positions = []
+cart_rotations = []
+camera_positions = []
+look_at_positions = []
+
+for _ in range(NUM_FRAMES):
+    # 1. Randomize cart position on warehouse floor
+    cx = random.uniform(-4.0, 4.0)
+    cy = random.uniform(-4.0, 4.0)
+    cz = 0.0
+    cart_positions.append((cx, cy, cz))
+    
+    # 2. Randomize cart yaw (0 to 360 degrees)
+    cyaw = random.uniform(0.0, 360.0)
+    cart_rotations.append((0.0, 0.0, cyaw))
+    
+    # 3. Camera position relative to cart (distance 1.0m to 2.0m, angle +/- 45 deg from front)
+    d = random.uniform(1.0, 2.0)
+    alpha = random.uniform(-45.0, 45.0)
+    
+    # Cart faces local X+. Camera is placed in front at distance d, angle alpha.
+    alpha_rad = np.radians(alpha)
+    local_x = d * np.cos(alpha_rad)
+    local_y = d * np.sin(alpha_rad)
+    
+    # Rotate local offset by cart yaw:
+    cyaw_rad = np.radians(cyaw)
+    wx = cx + local_x * np.cos(cyaw_rad) - local_y * np.sin(cyaw_rad)
+    wy = cy + local_x * np.sin(cyaw_rad) + local_y * np.cos(cyaw_rad)
+    wz = CAMERA_HEIGHT
+    camera_positions.append((wx, wy, wz))
+    
+    # 4. Look-at target:
+    # Camera has a fixed pitch tilt of 30 degrees upward, pointing at height:
+    target_z = CAMERA_HEIGHT + d * np.tan(np.radians(TILT_ANGLE))
+    
+    # Add small random offsets (de-centering) to make the target robust
+    offset_x = random.uniform(-0.1, 0.1)
+    offset_y = random.uniform(-0.1, 0.1)
+    offset_z = random.uniform(-0.05, 0.05)
+    
+    tx = cx + offset_x * np.cos(cyaw_rad) - offset_y * np.sin(cyaw_rad)
+    ty = cy + offset_x * np.sin(cyaw_rad) + offset_y * np.cos(cyaw_rad)
+    tz = target_z + offset_z
+    look_at_positions.append((tx, ty, tz))
 
 with rep.new_layer():
     # Load cart USD (no top-level semantics – applied per-prim below)
@@ -111,31 +178,23 @@ with rep.new_layer():
             print(f">>> Semantic applied: '{label}' → {prim.GetPath()}")
     
     # ── Ensure the renderer re-converges between randomized frames ─────────────
-    # Without RTSubframes, the render product may capture stale (pre-randomization)
-    # frames, producing identical images across all generated frames.
     rep.settings.carb_settings("/omni/replicator/RTSubframes", 4)
 
     # ── Create Scene Primitives ────────────────────────────────────────────────
-    # Initialize camera, dome (ambient) light, and distant (directional) light.
-    # We create them once here and then randomize their attributes every frame.
     domelight = rep.create.light(light_type="dome")
     distantlight = rep.create.light(light_type="distant")
     
-    # NOTE: focal_length is derived from the Gazebo simulated D455i color camera HFOV (90°):
-    #   f = horizontal_aperture / (2 * tan(HFOV/2))
-    #     = 20.955 / (2 * tan(45°)) = 10.4775 mm
-    # This matches the simulation camera intrinsics (fx = fy = 639.99768 on 1280x800 resolution)
+    # Camera matching physical RealSense D455i rotated 90 degrees (portrait)
     camera = rep.create.camera(
-        focal_length=10.4775,        # mm – matches Gazebo color 90° HFOV
+        focal_length=16.764,         # mm – keeping pixel focal length = 640.0 on 800px width
         horizontal_aperture=20.955,  # mm – standard 1" sensor default
-        clipping_range=(0.1, 10000.0),  # near=10cm prevents floor-clipping at low camera height
+        clipping_range=(0.1, 10000.0),  # near=10cm prevents floor-clipping
     )
     
-    # ── Robot-calibrated camera height parameter ──────────────────────────────
-    CAMERA_HEIGHT = 0.304  # metres
+    # Look-at target xform (invisible) for de-centering and camera targeting
+    look_at_target = rep.create.xform(name="look_at_target")
 
     # ── Load warehouse clutter props (distractors, no semantics) ──────────────
-    # Props from the same Isaac 4.0 S3 content server used for the warehouse.
     PROPS_BASE = f"{ISAAC_ASSETS}/Environments/Simple_Warehouse/Props"
     prop_urls = [
         f"{PROPS_BASE}/SM_PaletteA_01.usd",
@@ -145,46 +204,32 @@ with rep.new_layer():
     print(">>> Loading warehouse clutter props...")
     clutter_prims = []
     for url in prop_urls:
-        # Load 2 instances of each prop for denser scenes
         for i in range(2):
             prim = rep.create.from_usd(url)
             clutter_prims.append(prim)
             print(f">>> Loaded clutter prop: {url} (instance {i})")
     clutter_group = rep.create.group(clutter_prims)
 
-    # ── Look-at target xform (invisible) for de-centering the cart ────────────
-    # Instead of look_at=cart (always dead-centre), the camera will look at this
-    # target, whose position is randomized near — but not exactly at — the cart.
-    look_at_target = rep.create.xform(name="look_at_target")
+    # ── Apply sequence poses (exact trajectory constraints) ───────────────────
+    with cart:
+        rep.modify.pose(
+            position=rep.distribution.sequence(cart_positions),
+            rotation=rep.distribution.sequence(cart_rotations),
+        )
 
-    # ── Define Frame Randomizer Function ───────────────────────────────────────
-    # Evaluates distributions and updates poses/attributes on every frame trigger.
+    with look_at_target:
+        rep.modify.pose(
+            position=rep.distribution.sequence(look_at_positions),
+        )
+
+    with camera:
+        rep.modify.pose(
+            position=rep.distribution.sequence(camera_positions),
+            look_at=look_at_target,
+        )
+
+    # ── Define Frame Randomizer Function (clutter and lights only) ─────────────
     def randomize_scene():
-        with cart:
-            # Cart sits on the floor: Z=0 always.
-            # X/Y randomized across a wide area to produce varied viewpoints.
-            # Rotation only around Z (yaw) since the cart never tilts on flat floor.
-            rep.modify.pose(
-                position=rep.distribution.uniform((-4.0, -4.0, 0.0), (4.0, 4.0, 0.0)),
-                rotation=rep.distribution.uniform((0, 0, 0), (0, 0, 360)),
-            )
-        # ── De-centred look-at target ─────────────────────────────────────────
-        # Random offset from cart centroid (±1.5m XY, slight Z variation)
-        # so the cart appears off-centre in the frame — more realistic framing.
-        with look_at_target:
-            rep.modify.pose(
-                position=rep.distribution.uniform((-1.5, -1.5, -0.1), (1.5, 1.5, 0.3)),
-            )
-        with camera:
-            rep.modify.pose(
-                # Z is clamped to real robot height; XY sweeps a 9m × 9m arena
-                position=rep.distribution.uniform(
-                    (-4.5, -4.5, CAMERA_HEIGHT),
-                    ( 4.5,  4.5, CAMERA_HEIGHT),
-                ),
-                look_at=look_at_target,
-            )
-        # ── Scatter clutter props across the warehouse floor ──────────────────
         with clutter_group:
             rep.modify.pose(
                 position=rep.distribution.uniform((-5.0, -5.0, 0.0), (5.0, 5.0, 0.0)),
@@ -202,10 +247,10 @@ with rep.new_layer():
     # Register the randomizer and connect it to the frame trigger
     rep.randomizer.register(randomize_scene)
 
-    with rep.trigger.on_frame(max_execs=5):
+    with rep.trigger.on_frame(max_execs=NUM_FRAMES):
         rep.randomizer.randomize_scene()
 
-    render_product = rep.create.render_product(camera, resolution=(1280, 800))
+    render_product = rep.create.render_product(camera, resolution=(800, 1280))
     
     # Configure the output writer (saving RGB images and Semantic Segmentation masks)
     print(f">>> Configured dataset output directory: {output_directory}")

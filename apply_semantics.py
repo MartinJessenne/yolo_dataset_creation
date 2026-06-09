@@ -22,17 +22,28 @@ import os
 from pxr import Usd, Sdf, UsdGeom
 
 MESHES_DIR = os.path.join(os.path.dirname(__file__), "meshes")
-INPUT_PATH  = os.path.join(MESHES_DIR, "picanolcart.usdc")
-OUTPUT_PATH = os.path.join(MESHES_DIR, "picanolcart.usd")
 
-# ── Semantic label map ────────────────────────────────────────────────────────
-# Keys are the USD prim paths (as authored by Blender).
-# Values are the semantic class labels Isaac Sim Replicator will output.
-SEMANTICS = {
-    "/root/cart_body":    "cart_body",
-    "/root/left_handle":  "left_handle",
-    "/root/right_handle": "right_handle",
-}
+# Configurations for each cart type
+CONFIGS = [
+    {
+        "name": "Picanol Cart",
+        "input": "picanolcart.usdc",
+        "output": "picanolcart.usd",
+        "semantics": {
+            "/root/cart_body":    "cart_body",
+            "/root/left_handle":  "left_handle",
+            "/root/right_handle": "right_handle",
+        }
+    },
+    {
+        "name": "Colruyt Cart",
+        "input": "colruyt.usdc",
+        "output": "colruyt.usd",
+        "semantics": {
+            "/root/colruyt_cart": "cart_body",
+        }
+    }
+]
 
 # Blender-default prims that serve no purpose in simulation
 PRIMS_TO_REMOVE = [
@@ -43,77 +54,74 @@ PRIMS_TO_REMOVE = [
     "/root/env_light",
 ]
 
-# ─────────────────────────────────────────────────────────────────────────────
+def process_cart(config):
+    input_path = os.path.join(MESHES_DIR, config["input"])
+    output_path = os.path.join(MESHES_DIR, config["output"])
+    
+    if not os.path.exists(input_path):
+        print(f"\n>>> Skipping {config['name']}: Input file not found at {input_path}")
+        return
 
-print(f"\n>>> Opening: {INPUT_PATH}")
-if not os.path.exists(INPUT_PATH):
-    raise FileNotFoundError(
-        f"picanolcart.usdc not found at {INPUT_PATH}.\n"
-        "Export from Blender first."
-    )
+    print(f"\n>>> Processing {config['name']} ...")
+    print(f"    Opening: {input_path}")
+    stage = Usd.Stage.Open(input_path)
 
-stage = Usd.Stage.Open(INPUT_PATH)
+    # ── 1. Verify metadata ────────────────────────────────────────────────────────
+    up_axis = UsdGeom.GetStageUpAxis(stage)
+    mpu     = UsdGeom.GetStageMetersPerUnit(stage)
+    print(f"    Up Axis       : {up_axis}  (expected Z)")
+    print(f"    metersPerUnit : {mpu}  (expected 1.0)")
+    assert str(up_axis).upper() in ("Z", "Z_UP"), f"Wrong up axis: {up_axis}"
+    assert abs(mpu - 1.0) < 1e-4, f"Wrong metersPerUnit: {mpu}"
 
-# ── 1. Verify metadata ────────────────────────────────────────────────────────
-up_axis = UsdGeom.GetStageUpAxis(stage)
-mpu     = UsdGeom.GetStageMetersPerUnit(stage)
-print(f"    Up Axis       : {up_axis}  (expected Z)")
-print(f"    metersPerUnit : {mpu}  (expected 1.0)")
-assert str(up_axis).upper() in ("Z", "Z_UP"), f"Wrong up axis: {up_axis}"
-assert abs(mpu - 1.0) < 1e-4, f"Wrong metersPerUnit: {mpu}"
+    # ── 2. Remove Blender-default scene prims ────────────────────────────────────
+    print("    Removing Blender-default scene prims ...")
+    for path in PRIMS_TO_REMOVE:
+        prim = stage.GetPrimAtPath(path)
+        if prim.IsValid():
+            stage.RemovePrim(path)
+            print(f"      Removed: {path}")
 
-# ── 2. Remove Blender-default scene prims ────────────────────────────────────
-print("\n>>> Removing Blender-default scene prims ...")
-for path in PRIMS_TO_REMOVE:
-    prim = stage.GetPrimAtPath(path)
-    if prim.IsValid():
-        stage.RemovePrim(path)
-        print(f"    Removed: {path}")
-    else:
-        print(f"    Not found (already absent): {path}")
+    # ── 3. Bake semantic attributes ───────────────────────────────────────────────
+    print("    Baking semantic attributes ...")
+    for prim_path, label in config["semantics"].items():
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            print(f"      WARNING: prim not found: {prim_path} – skipping.")
+            continue
 
-# ── 3. Bake semantic attributes ───────────────────────────────────────────────
-# Isaac Sim / Omniverse Kit reads semantic labels from these two custom
-# attributes on a prim:
-#   semantics:params:semanticType  → "class"
-#   semantics:params:semanticData  → <the label string>
-print("\n>>> Baking semantic attributes ...")
-for prim_path, label in SEMANTICS.items():
-    prim = stage.GetPrimAtPath(prim_path)
-    if not prim.IsValid():
-        print(f"    WARNING: prim not found: {prim_path} – skipping.")
-        continue
+        type_attr = prim.CreateAttribute(
+            "semantics:params:semanticType",
+            Sdf.ValueTypeNames.String,
+            custom=True,
+        )
+        type_attr.Set("class")
 
-    # Create or update the two semantic attributes
-    type_attr = prim.CreateAttribute(
-        "semantics:params:semanticType",
-        Sdf.ValueTypeNames.String,
-        custom=True,
-    )
-    type_attr.Set("class")
+        data_attr = prim.CreateAttribute(
+            "semantics:params:semanticData",
+            Sdf.ValueTypeNames.String,
+            custom=True,
+        )
+        data_attr.Set(label)
+        print(f"      {prim_path}  ➔  class: \"{label}\"")
 
-    data_attr = prim.CreateAttribute(
-        "semantics:params:semanticData",
-        Sdf.ValueTypeNames.String,
-        custom=True,
-    )
-    data_attr.Set(label)
+    # ── 4. Save as .usd ───────────────────────────────────────────────────────────
+    print(f"    Saving to: {output_path}")
+    stage.GetRootLayer().Export(output_path)
 
-    print(f"    {prim_path}  →  class: \"{label}\"")
+    # ── 5. Quick readback verification ────────────────────────────────────────────
+    print("    Verifying output:")
+    verify_stage = Usd.Stage.Open(output_path)
+    for prim_path, expected_label in config["semantics"].items():
+        prim = verify_stage.GetPrimAtPath(prim_path)
+        if prim.IsValid():
+            label = prim.GetAttribute("semantics:params:semanticData").Get()
+            status = "OK" if label == expected_label else f"MISMATCH (got {label})"
+            print(f"      {prim_path}  ➔  {label}  [{status}]")
+        else:
+            print(f"      {prim_path}  ➔  NOT FOUND")
 
-# ── 4. Save as .usd ───────────────────────────────────────────────────────────
-print(f"\n>>> Saving to: {OUTPUT_PATH}")
-stage.GetRootLayer().Export(OUTPUT_PATH)
-print(">>> Done.\n")
+for config in CONFIGS:
+    process_cart(config)
 
-# ── 5. Quick readback verification ────────────────────────────────────────────
-print(">>> Verification readback:")
-verify_stage = Usd.Stage.Open(OUTPUT_PATH)
-for prim_path, expected_label in SEMANTICS.items():
-    prim = verify_stage.GetPrimAtPath(prim_path)
-    if prim.IsValid():
-        label = prim.GetAttribute("semantics:params:semanticData").Get()
-        status = "OK" if label == expected_label else f"MISMATCH (got {label})"
-        print(f"    {prim_path}  →  {label}  [{status}]")
-    else:
-        print(f"    {prim_path}  →  NOT FOUND")
+print("\n>>> All processing complete.\n")
