@@ -182,9 +182,8 @@ with rep.new_layer():
             print(f">>> Semantic applied: '{label}' → {prim.GetPath()}")
     
     # ── Ensure the renderer re-converges between randomized frames ─────────────
-    # Increased RTSubframes to 32 and enabled denoiser to remove path-tracing grain
+    # Increased RTSubframes to 32 to allow proper convergence
     rep.settings.carb_settings("/omni/replicator/RTSubframes", 32)
-    rep.settings.carb_settings("/rtx/pathtracing/optixDenoiser/enabled", True)
 
     # ── Create Scene Primitives ────────────────────────────────────────────────
     domelight = rep.create.light(light_type="dome")
