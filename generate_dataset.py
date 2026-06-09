@@ -114,6 +114,7 @@ import math
 # Camera geometry constants
 CAMERA_HEIGHT = 0.304  # meters
 TILT_ANGLE = 30.0      # degrees (pitch tilt upward)
+L_HALF = 0.761 if CART_TYPE == "colruyt" else 0.88
 
 cart_positions = []
 cart_rotations = []
@@ -131,13 +132,13 @@ for _ in range(NUM_FRAMES):
     cyaw = random.uniform(0.0, 360.0)
     cart_rotations.append((0.0, 0.0, cyaw))
     
-    # 3. Camera position relative to cart (distance 1.0m to 2.0m, angle +/- 45 deg from front)
+    # 3. Camera position relative to the front surface of the cart (1.0m to 2.0m, +/- 45 deg)
     d = random.uniform(1.0, 2.0)
     alpha = random.uniform(-45.0, 45.0)
     
-    # Cart faces local X+. Camera is placed in front at distance d, angle alpha.
     alpha_rad = math.radians(alpha)
-    local_x = d * math.cos(alpha_rad)
+    # Camera coordinates in the cart's local frame
+    local_x = L_HALF + d * math.cos(alpha_rad)
     local_y = d * math.sin(alpha_rad)
     
     # Rotate local offset by cart yaw:
@@ -147,17 +148,20 @@ for _ in range(NUM_FRAMES):
     wz = CAMERA_HEIGHT
     camera_positions.append((float(wx), float(wy), float(wz)))
     
-    # 4. Look-at target:
-    # Camera has a fixed pitch tilt of 30 degrees upward, pointing at height:
+    # 4. Look-at target (centered at the front surface, Z height matching the 30-degree camera tilt)
     target_z = CAMERA_HEIGHT + d * math.tan(math.radians(TILT_ANGLE))
     
-    # Add small random offsets (de-centering) to make the target robust
+    # Add small random offsets (de-centering) for robustness
     offset_x = random.uniform(-0.1, 0.1)
     offset_y = random.uniform(-0.1, 0.1)
     offset_z = random.uniform(-0.05, 0.05)
     
-    tx = cx + offset_x * math.cos(cyaw_rad) - offset_y * math.sin(cyaw_rad)
-    ty = cy + offset_x * math.sin(cyaw_rad) + offset_y * math.cos(cyaw_rad)
+    # Look-at target coordinates relative to the cart's front center in local frame: (L_HALF + offset_x, offset_y)
+    local_tx = L_HALF + offset_x
+    local_ty = offset_y
+    
+    tx = cx + local_tx * math.cos(cyaw_rad) - local_ty * math.sin(cyaw_rad)
+    ty = cy + local_tx * math.sin(cyaw_rad) + local_ty * math.cos(cyaw_rad)
     tz = target_z + offset_z
     look_at_positions.append((float(tx), float(ty), float(tz)))
 
@@ -178,7 +182,9 @@ with rep.new_layer():
             print(f">>> Semantic applied: '{label}' → {prim.GetPath()}")
     
     # ── Ensure the renderer re-converges between randomized frames ─────────────
-    rep.settings.carb_settings("/omni/replicator/RTSubframes", 4)
+    # Increased RTSubframes to 32 and enabled denoiser to remove path-tracing grain
+    rep.settings.carb_settings("/omni/replicator/RTSubframes", 32)
+    rep.settings.carb_settings("/rtx/pathtracing/optixDenoiser/enabled", True)
 
     # ── Create Scene Primitives ────────────────────────────────────────────────
     domelight = rep.create.light(light_type="dome")
@@ -210,26 +216,23 @@ with rep.new_layer():
             print(f">>> Loaded clutter prop: {url} (instance {i})")
     clutter_group = rep.create.group(clutter_prims)
 
-    # ── Apply sequence poses (exact trajectory constraints) ───────────────────
-    with cart:
-        rep.modify.pose(
-            position=rep.distribution.sequence(cart_positions),
-            rotation=rep.distribution.sequence(cart_rotations),
-        )
-
-    with look_at_target:
-        rep.modify.pose(
-            position=rep.distribution.sequence(look_at_positions),
-        )
-
-    with camera:
-        rep.modify.pose(
-            position=rep.distribution.sequence(camera_positions),
-            look_at=look_at_target,
-        )
-
-    # ── Define Frame Randomizer Function (clutter and lights only) ─────────────
+    # ── Define Frame Randomizer Function (Updates all poses & lighting) ────────
     def randomize_scene():
+        # Update sequences (must be evaluated inside the trigger to advance)
+        with cart:
+            rep.modify.pose(
+                position=rep.distribution.sequence(cart_positions),
+                rotation=rep.distribution.sequence(cart_rotations),
+            )
+        with look_at_target:
+            rep.modify.pose(
+                position=rep.distribution.sequence(look_at_positions),
+            )
+        with camera:
+            rep.modify.pose(
+                position=rep.distribution.sequence(camera_positions),
+                look_at=look_at_target,
+            )
         with clutter_group:
             rep.modify.pose(
                 position=rep.distribution.uniform((-5.0, -5.0, 0.0), (5.0, 5.0, 0.0)),
