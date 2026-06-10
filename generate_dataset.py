@@ -288,46 +288,38 @@ with rep.new_layer():
 
 # ── Renderer diagnostics (identify active render backend and dump settings) ───
 import carb
+import carb.dictionary
 _settings = carb.settings.get_settings()
+_dict = carb.dictionary.get_dictionary_interface()
 
 print(">>> ═══════════════════════════════════════════════════════")
-print(">>>  RENDERER DIAGNOSTICS & SETTINGS DUMP")
+print(">>>  RENDERER DIAGNOSTICS & COMPLETE RTX SETTINGS DUMP")
 print(">>> ═══════════════════════════════════════════════════════")
 print(f">>> [DIAG] Render mode:                    {_settings.get('/rtx/rendermode')}")
 print(f">>> [DIAG] RT Subframes:                    {_settings.get('/omni/replicator/RTSubframes')}")
-
-keys_to_query = [
-    "/rtx/rendermode",
-    "/rtx/pathtracing/enabled",
-    "/rtx/pathtracing/optixDenoiser/enabled",
-    "/rtx/pathtracing/optixDenoiser/execMode",
-    "/rtx/post/aa/op",
-    "/rtx/post/dlss/enabled",
-    "/rtx/post/dlss/execMode",
-    "/rtx/post/dlss/rayReconstruction",
-    "/rtx/post/dlss/rayReconstructionEnabled",
-    "/rtx/post/denoiser/enabled",
-    "/rtx/post/denoiser/execMode",
-    "/rtx/post/spatialDenoiser/enabled",
-    "/rtx/post/temporalDenoiser/enabled",
-    "/rtx/directLighting/denoiser/enabled",
-    "/rtx/indirectDiffuse/denoiser/enabled",
-    "/rtx/indirectSpecular/denoiser/enabled",
-    "/rtx/post/tonemap/denoiser/enabled",
-    "/rtx/post/rtxdlss/enabled",
-    "/rtx/reflections/denoiser/enabled",
-    "/rtx/shadows/denoiser/enabled",
-    "/rtx/ambientOcclusion/denoiser/enabled",
-    "/rtx/globalIllumination/denoiser/enabled"
-]
-
 print(">>> ───────────────────────────────────────────────────────")
-print(">>>  SETTINGS DUMP (denois, dlss, spp, rendermode)")
+print(">>>  FULL RTX SETTINGS TREE")
 print(">>> ───────────────────────────────────────────────────────")
-for k in keys_to_query:
-    val = _settings.get(k)
-    if val is not None:
-        print(f">>> [DUMP] {k} = {val}")
+
+def dump_item(item, path=""):
+    keys = _dict.get_keys(item)
+    if not keys:
+        print(f">>> [DUMP] {path} = {_settings.get(path)}")
+        return
+    for k in keys:
+        sub_path = f"{path}/{k}" if path else f"/{k}"
+        sub_item = _dict.get_item(item, k)
+        dump_item(sub_item, sub_path)
+
+try:
+    settings_root = _settings.get_settings_dictionary()
+    rtx_node = _dict.get_item(settings_root, "rtx")
+    if rtx_node:
+        dump_item(rtx_node, "/rtx")
+    else:
+        print(">>> [DUMP] Error: /rtx node not found in settings dictionary.")
+except Exception as e:
+    print(f">>> [DUMP] Error during settings traversal: {e}")
 print(">>> [DIAG] ISettings Python Methods:")
 print(">>>", dir(_settings))
 print(">>> ═══════════════════════════════════════════════════════")
