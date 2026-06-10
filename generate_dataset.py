@@ -272,6 +272,22 @@ with rep.new_layer():
 # The graph must be fully defined (layer sealed) before the orchestrator runs.
 # num_frames is controlled solely by on_frame(num_frames=5) above;
 # orchestrator.run() with no args stops when all triggers are exhausted.
+
+# ── Renderer diagnostics (identify active render backend) ─────────────────────
+import carb
+_settings = carb.settings.get_settings()
+print(">>> ═══════════════════════════════════════════════════════")
+print(">>>  RENDERER DIAGNOSTICS")
+print(">>> ═══════════════════════════════════════════════════════")
+print(f">>> [DIAG] Render mode:             {_settings.get('/rtx/rendermode')}")
+print(f">>> [DIAG] Path tracing enabled:    {_settings.get('/rtx/pathtracing/enabled')}")
+print(f">>> [DIAG] Path tracing SPP:        {_settings.get('/rtx/pathtracing/spp')}")
+print(f">>> [DIAG] Path tracing total SPP:  {_settings.get('/rtx/pathtracing/totalSpp')}")
+print(f">>> [DIAG] Denoiser enabled:        {_settings.get('/rtx/pathtracing/optixDenoiser/enabled')}")
+print(f">>> [DIAG] RT Subframes:            {_settings.get('/omni/replicator/RTSubframes')}")
+print(f">>> [DIAG] Post AA op:              {_settings.get('/rtx/post/aa/op')}")
+print(">>> ═══════════════════════════════════════════════════════")
+
 print(">>> Starting synthetic generation...")
 rep.orchestrator.run()
 
