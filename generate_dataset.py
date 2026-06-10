@@ -14,6 +14,11 @@ sys.stderr.reconfigure(line_buffering=True)
 # Disable RTX driver verification check for driver compatibility on daman host
 sys.argv.append("--/rtx/verifyDriverVersion/enabled=false")
 
+# Enable full verbose engine logging for debugging headless Vulkan/denoiser initialization
+sys.argv.append("--/log/level=verbose")
+sys.argv.append("--/log/consoleLogLevel=verbose")
+sys.argv.append("--/log/fileLogLevel=verbose")
+
 # Force RTX Real-Time 2.0 (path-tracing based) renderer before SimulationApp initializes.
 # Isaac Sim 6.0 no longer supports traditional rasterization (RaytracedLighting).
 # Both Real-Time 2.0 and Interactive modes use a path-tracing based core.
@@ -323,6 +328,8 @@ for k in keys_to_query:
     val = _settings.get(k)
     if val is not None:
         print(f">>> [DUMP] {k} = {val}")
+print(">>> [DIAG] ISettings Python Methods:")
+print(">>>", dir(_settings))
 print(">>> ═══════════════════════════════════════════════════════")
 
 print(">>> Starting synthetic generation...")
