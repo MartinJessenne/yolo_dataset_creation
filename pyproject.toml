@@ -8,6 +8,8 @@ dependencies = [
     "marimo>=0.10.0",                                                                          
     "isaacsim[all,extscache]==6.0.0",                                                          
     "numpy<2.0.0",                                                                             
+    "opencv-python",
+    "pyyaml",
 ]                                                                                              
                                                                                                
 # Configure the NVIDIA extra index URL persistently inside the project                         
