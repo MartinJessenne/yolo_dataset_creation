@@ -14,11 +14,10 @@ sys.stderr.reconfigure(line_buffering=True)
 # Disable RTX driver verification check for driver compatibility on daman host
 sys.argv.append("--/rtx/verifyDriverVersion/enabled=false")
 
-# Force RTX Real-Time (rasterization) renderer before SimulationApp initializes.
-# Isaac Sim 6.0 defaults to RealTimePathTracing which produces grain without
-# a functional OptiX denoiser (fails silently headlessly on daman).
-# Must be set via sys.argv because the render mode is locked after init.
-sys.argv.append("--/rtx/rendermode=RaytracedLighting")
+# Force RTX Real-Time 2.0 (path-tracing based) renderer before SimulationApp initializes.
+# Isaac Sim 6.0 no longer supports traditional rasterization (RaytracedLighting).
+# Both Real-Time 2.0 and Interactive modes use a path-tracing based core.
+sys.argv.append("--/rtx/rendermode=RealTimePathTracing")
 
 # Parse custom command-line arguments before SimulationApp consumes them
 CART_TYPE = "picanol"
@@ -46,8 +45,8 @@ if "--frames" in sys.argv:
 from isaacsim import SimulationApp
 import os
 
-# 1. Start the simulation application headless with the RTX Real-Time renderer
-simulation_app = SimulationApp({"headless": True, "renderer": "RaytracedLighting"})
+# 1. Start the simulation application headless
+simulation_app = SimulationApp({"headless": True, "renderer": "RealTimePathTracing"})
 
 # Inject compatibility shim for Warp 1.15+ (required by Replicator in older configurations)
 import types
@@ -278,28 +277,35 @@ with rep.new_layer():
 # num_frames is controlled solely by on_frame(num_frames=5) above;
 # orchestrator.run() with no args stops when all triggers are exhausted.
 
-# ── Renderer diagnostics (identify active render backend) ─────────────────────
+# ── Renderer diagnostics (identify active render backend and dump settings) ───
 import carb
 _settings = carb.settings.get_settings()
+
+def dump_settings_filtered(d, prefix="", filter_word=""):
+    if not isinstance(d, dict):
+        return
+    for k, v in d.items():
+        full_key = f"{prefix}/{k}"
+        if isinstance(v, dict):
+            dump_settings_filtered(v, full_key, filter_word)
+        else:
+            if filter_word in full_key.lower():
+                print(full_key, "=", v)
+
 print(">>> ═══════════════════════════════════════════════════════")
-print(">>>  RENDERER DIAGNOSTICS")
+print(">>>  RENDERER DIAGNOSTICS & SETTINGS DUMP")
 print(">>> ═══════════════════════════════════════════════════════")
 print(f">>> [DIAG] Render mode:                    {_settings.get('/rtx/rendermode')}")
-print(f">>> [DIAG] Path tracing enabled:            {_settings.get('/rtx/pathtracing/enabled')}")
-print(f">>> [DIAG] Path tracing SPP:                {_settings.get('/rtx/pathtracing/spp')}")
-print(f">>> [DIAG] Path tracing total SPP:          {_settings.get('/rtx/pathtracing/totalSpp')}")
 print(f">>> [DIAG] RT Subframes:                    {_settings.get('/omni/replicator/RTSubframes')}")
-print(f">>> [DIAG] Post AA op:                      {_settings.get('/rtx/post/aa/op')}")
 print(">>> ───────────────────────────────────────────────────────")
-print(">>>  DENOISER DIAGNOSTICS")
+print(">>>  SETTINGS DUMP (denois, dlss, spp, rendermode)")
 print(">>> ───────────────────────────────────────────────────────")
-print(f">>> [DIAG] OptiX denoiser:                  {_settings.get('/rtx/pathtracing/optixDenoiser/enabled')}")
-print(f">>> [DIAG] Post denoiser:                   {_settings.get('/rtx/post/denoiser/enabled')}")
-print(f">>> [DIAG] Direct lighting denoiser:         {_settings.get('/rtx/directLighting/denoiser/enabled')}")
-print(f">>> [DIAG] Indirect diffuse denoiser:        {_settings.get('/rtx/indirectDiffuse/denoiser/enabled')}")
-print(f">>> [DIAG] Indirect specular denoiser:       {_settings.get('/rtx/indirectSpecular/denoiser/enabled')}")
-print(f">>> [DIAG] Post tonemap denoiser:            {_settings.get('/rtx/post/tonemap/denoiser/enabled')}")
-print(f">>> [DIAG] DLSS enabled:                    {_settings.get('/rtx/post/dlss/enabled')}")
+rtx_dict = _settings.get_dict("/rtx")
+if rtx_dict:
+    dump_settings_filtered(rtx_dict, "/rtx", "denois")
+    dump_settings_filtered(rtx_dict, "/rtx", "dlss")
+    dump_settings_filtered(rtx_dict, "/rtx", "spp")
+    dump_settings_filtered(rtx_dict, "/rtx", "rendermode")
 print(">>> ═══════════════════════════════════════════════════════")
 
 print(">>> Starting synthetic generation...")
