@@ -281,31 +281,44 @@ with rep.new_layer():
 import carb
 _settings = carb.settings.get_settings()
 
-def dump_settings_filtered(d, prefix="", filter_word=""):
-    if not isinstance(d, dict):
-        return
-    for k, v in d.items():
-        full_key = f"{prefix}/{k}"
-        if isinstance(v, dict):
-            dump_settings_filtered(v, full_key, filter_word)
-        else:
-            if filter_word in full_key.lower():
-                print(full_key, "=", v)
-
 print(">>> ═══════════════════════════════════════════════════════")
 print(">>>  RENDERER DIAGNOSTICS & SETTINGS DUMP")
 print(">>> ═══════════════════════════════════════════════════════")
 print(f">>> [DIAG] Render mode:                    {_settings.get('/rtx/rendermode')}")
 print(f">>> [DIAG] RT Subframes:                    {_settings.get('/omni/replicator/RTSubframes')}")
+
+keys_to_query = [
+    "/rtx/rendermode",
+    "/rtx/pathtracing/enabled",
+    "/rtx/pathtracing/optixDenoiser/enabled",
+    "/rtx/pathtracing/optixDenoiser/execMode",
+    "/rtx/post/aa/op",
+    "/rtx/post/dlss/enabled",
+    "/rtx/post/dlss/execMode",
+    "/rtx/post/dlss/rayReconstruction",
+    "/rtx/post/dlss/rayReconstructionEnabled",
+    "/rtx/post/denoiser/enabled",
+    "/rtx/post/denoiser/execMode",
+    "/rtx/post/spatialDenoiser/enabled",
+    "/rtx/post/temporalDenoiser/enabled",
+    "/rtx/directLighting/denoiser/enabled",
+    "/rtx/indirectDiffuse/denoiser/enabled",
+    "/rtx/indirectSpecular/denoiser/enabled",
+    "/rtx/post/tonemap/denoiser/enabled",
+    "/rtx/post/rtxdlss/enabled",
+    "/rtx/reflections/denoiser/enabled",
+    "/rtx/shadows/denoiser/enabled",
+    "/rtx/ambientOcclusion/denoiser/enabled",
+    "/rtx/globalIllumination/denoiser/enabled"
+]
+
 print(">>> ───────────────────────────────────────────────────────")
 print(">>>  SETTINGS DUMP (denois, dlss, spp, rendermode)")
 print(">>> ───────────────────────────────────────────────────────")
-rtx_dict = _settings.get_dict("/rtx")
-if rtx_dict:
-    dump_settings_filtered(rtx_dict, "/rtx", "denois")
-    dump_settings_filtered(rtx_dict, "/rtx", "dlss")
-    dump_settings_filtered(rtx_dict, "/rtx", "spp")
-    dump_settings_filtered(rtx_dict, "/rtx", "rendermode")
+for k in keys_to_query:
+    val = _settings.get(k)
+    if val is not None:
+        print(f">>> [DUMP] {k} = {val}")
 print(">>> ═══════════════════════════════════════════════════════")
 
 print(">>> Starting synthetic generation...")
