@@ -186,7 +186,11 @@ with rep.new_layer():
             add_labels(prim, [label], "class")
             print(f">>> Semantic applied: '{label}' → {prim.GetPath()}")
     
-    # ── Renderer convergence subframes ─────────────────────────────────────────
+    # ── Force real-time compute denoisers since NGX (DLSS/OptiX) fails headlessly ──
+    rep.settings.carb_settings("/rtx/indirectDiffuse/denoiser/enabled", True)
+    rep.settings.carb_settings("/rtx/reflections/denoiser/enabled", True)
+    rep.settings.carb_settings("/rtx/post/aa/op", 1)  # Force TAA (1) instead of DLSS (3)
+    rep.settings.carb_settings("/rtx/pathtracing/optixDenoiser/enabled", False)
     rep.settings.carb_settings("/omni/replicator/RTSubframes", 4)
 
     # ── Create Scene Primitives ────────────────────────────────────────────────
