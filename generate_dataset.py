@@ -14,6 +14,12 @@ sys.stderr.reconfigure(line_buffering=True)
 # Disable RTX driver verification check for driver compatibility on daman host
 sys.argv.append("--/rtx/verifyDriverVersion/enabled=false")
 
+# Force RTX Real-Time (rasterization) renderer before SimulationApp initializes.
+# Isaac Sim 6.0 defaults to RealTimePathTracing which produces grain without
+# a functional OptiX denoiser (fails silently headlessly on daman).
+# Must be set via sys.argv because the render mode is locked after init.
+sys.argv.append("--/rtx/rendermode=RaytracedLighting")
+
 # Parse custom command-line arguments before SimulationApp consumes them
 CART_TYPE = "picanol"
 if "--cart" in sys.argv:
@@ -181,8 +187,7 @@ with rep.new_layer():
             add_labels(prim, [label], "class")
             print(f">>> Semantic applied: '{label}' → {prim.GetPath()}")
     
-    # ── Ensure the renderer re-converges between randomized frames ─────────────
-    # Reverted RTSubframes to 4 to fallback on built-in real-time compute denoiser (Option A)
+    # ── Renderer convergence subframes ─────────────────────────────────────────
     rep.settings.carb_settings("/omni/replicator/RTSubframes", 4)
 
     # ── Create Scene Primitives ────────────────────────────────────────────────
@@ -279,13 +284,22 @@ _settings = carb.settings.get_settings()
 print(">>> ═══════════════════════════════════════════════════════")
 print(">>>  RENDERER DIAGNOSTICS")
 print(">>> ═══════════════════════════════════════════════════════")
-print(f">>> [DIAG] Render mode:             {_settings.get('/rtx/rendermode')}")
-print(f">>> [DIAG] Path tracing enabled:    {_settings.get('/rtx/pathtracing/enabled')}")
-print(f">>> [DIAG] Path tracing SPP:        {_settings.get('/rtx/pathtracing/spp')}")
-print(f">>> [DIAG] Path tracing total SPP:  {_settings.get('/rtx/pathtracing/totalSpp')}")
-print(f">>> [DIAG] Denoiser enabled:        {_settings.get('/rtx/pathtracing/optixDenoiser/enabled')}")
-print(f">>> [DIAG] RT Subframes:            {_settings.get('/omni/replicator/RTSubframes')}")
-print(f">>> [DIAG] Post AA op:              {_settings.get('/rtx/post/aa/op')}")
+print(f">>> [DIAG] Render mode:                    {_settings.get('/rtx/rendermode')}")
+print(f">>> [DIAG] Path tracing enabled:            {_settings.get('/rtx/pathtracing/enabled')}")
+print(f">>> [DIAG] Path tracing SPP:                {_settings.get('/rtx/pathtracing/spp')}")
+print(f">>> [DIAG] Path tracing total SPP:          {_settings.get('/rtx/pathtracing/totalSpp')}")
+print(f">>> [DIAG] RT Subframes:                    {_settings.get('/omni/replicator/RTSubframes')}")
+print(f">>> [DIAG] Post AA op:                      {_settings.get('/rtx/post/aa/op')}")
+print(">>> ───────────────────────────────────────────────────────")
+print(">>>  DENOISER DIAGNOSTICS")
+print(">>> ───────────────────────────────────────────────────────")
+print(f">>> [DIAG] OptiX denoiser:                  {_settings.get('/rtx/pathtracing/optixDenoiser/enabled')}")
+print(f">>> [DIAG] Post denoiser:                   {_settings.get('/rtx/post/denoiser/enabled')}")
+print(f">>> [DIAG] Direct lighting denoiser:         {_settings.get('/rtx/directLighting/denoiser/enabled')}")
+print(f">>> [DIAG] Indirect diffuse denoiser:        {_settings.get('/rtx/indirectDiffuse/denoiser/enabled')}")
+print(f">>> [DIAG] Indirect specular denoiser:       {_settings.get('/rtx/indirectSpecular/denoiser/enabled')}")
+print(f">>> [DIAG] Post tonemap denoiser:            {_settings.get('/rtx/post/tonemap/denoiser/enabled')}")
+print(f">>> [DIAG] DLSS enabled:                    {_settings.get('/rtx/post/dlss/enabled')}")
 print(">>> ═══════════════════════════════════════════════════════")
 
 print(">>> Starting synthetic generation...")
