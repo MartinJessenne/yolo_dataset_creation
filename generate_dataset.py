@@ -46,8 +46,8 @@ if "--frames" in sys.argv:
 from isaacsim import SimulationApp
 import os
 
-# 1. Start the simulation application headless
-simulation_app = SimulationApp({"headless": True})
+# 1. Start the simulation application headless with the RTX Real-Time renderer
+simulation_app = SimulationApp({"headless": True, "renderer": "RaytracedLighting"})
 
 # Inject compatibility shim for Warp 1.15+ (required by Replicator in older configurations)
 import types
