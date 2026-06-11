@@ -47,7 +47,7 @@ if "--frames" in sys.argv:
     except ValueError:
         pass
 
-from isaacsim import SimulationApp
+from isaacsim.simulation_app import SimulationApp
 import os
 
 # 1. Start the simulation application headless
@@ -70,7 +70,8 @@ except Exception as e:
 import sys
 import omni.usd
 import omni.replicator.core as rep
-from isaacsim.core.utils.semantics import add_labels
+from isaacsim.core.utils.semantics import add_update_semantics
+
 
 # Enable the asset converter extension using Isaac Sim utility
 from isaacsim.core.utils.extensions import enable_extension
@@ -91,13 +92,12 @@ if not os.path.exists(cart_usd_path):
 print(f">>> Loaded target USD model: {cart_usd_path}")
 
 # 3. Open NVIDIA's hosted Simple Warehouse USD scene
-from isaacsim.storage.native import get_assets_root_path
+from isaacsim.core.utils.nucleus import get_assets_root_path
 assets_root_path = get_assets_root_path()
 if assets_root_path:
     ISAAC_ASSETS = f"{assets_root_path}/Isaac"
 else:
-    # Fallback to public S3 bucket for version 6.0
-    ISAAC_ASSETS = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0/Isaac"
+    ISAAC_ASSETS = "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.5/Isaac"
 
 warehouse_url = f"{ISAAC_ASSETS}/Environments/Simple_Warehouse/warehouse.usd"
 print(f">>> Loading warehouse environment from: {warehouse_url}")
@@ -188,7 +188,7 @@ with rep.new_layer():
     for prim in stage.Traverse():
         label = CART_SEMANTIC_MAP.get(prim.GetName())
         if label:
-            add_labels(prim, [label], "class")
+            add_update_semantics(prim, semantic_label=label, type_label="class")
             print(f">>> Semantic applied: '{label}' → {prim.GetPath()}")
     
     # ── Force real-time compute denoisers since NGX (DLSS/OptiX) fails headlessly ──
