@@ -50,7 +50,7 @@ if "--frames" in sys.argv:
     except ValueError:
         pass
 
-from isaacsim.simulation_app import SimulationApp
+from omni.isaac.kit import SimulationApp
 
 # 1. Start the simulation application headless
 simulation_app = SimulationApp({"headless": True, "renderer": "RealTimePathTracing"})
@@ -71,10 +71,10 @@ except Exception as e:
 
 import omni.usd
 import omni.replicator.core as rep
-from isaacsim.core.utils.semantics import add_update_semantics
+from omni.isaac.core.utils.semantics import add_update_semantics
 
 # Enable the asset converter extension using Isaac Sim utility
-from isaacsim.core.utils.extensions import enable_extension
+from omni.isaac.core.utils.extensions import enable_extension
 enable_extension("omni.kit.asset_converter")
 import omni.kit.asset_converter
 
@@ -92,7 +92,7 @@ if not os.path.exists(cart_usd_path):
 print(f">>> Loaded target USD model: {cart_usd_path}")
 
 # 3. Open NVIDIA's hosted Simple Warehouse USD scenes list
-from isaacsim.core.utils.nucleus import get_assets_root_path
+from omni.isaac.core.utils.nucleus import get_assets_root_path
 assets_root_path = get_assets_root_path()
 if assets_root_path:
     ISAAC_ASSETS = f"{assets_root_path}/Isaac"
@@ -159,6 +159,7 @@ def consolidate_datasets(output_dir, num_scenes):
             
         print(f">>> Consolidating temporary files from: {temp_dir}")
         for root, dirs, files in os.walk(temp_dir):
+            print(f">>> Found {len(files)} files in: {root}")
             frame_files = {}
             for file in files:
                 name, ext = os.path.splitext(file)
@@ -166,9 +167,12 @@ def consolidate_datasets(output_dir, num_scenes):
                 if len(parts) > 0 and parts[-1].isdigit():
                     idx = int(parts[-1])
                     prefix = '_'.join(parts[:-1])
-                    if idx not in frame_files:
-                        frame_files[idx] = []
-                    frame_files[idx].append((prefix, ext, file, os.path.join(root, file)))
+                else:
+                    idx = 0
+                    prefix = name
+                if idx not in frame_files:
+                    frame_files[idx] = []
+                frame_files[idx].append((prefix, ext, file, os.path.join(root, file)))
             
             for local_idx in sorted(frame_files.keys()):
                 for prefix, file_ext, original_file, src_path in frame_files[local_idx]:
@@ -397,10 +401,10 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
                 rep.modify.pose(rotation=rep.distribution.uniform((0, 0, 0), (360, 360, 360)))
             return cart.node
 
-        # Register the randomizer and connect it to the frame trigger
+        # Register the randomizer (triggered explicitly via orchestrator.step())
         rep.randomizer.register(randomize_scene)
 
-        with rep.trigger.on_frame(max_execs=frames_for_this_scene):
+        with rep.trigger.on_frame(num_frames=1):
             rep.randomizer.randomize_scene()
 
         render_product = rep.create.render_product(camera, resolution=(800, 1280))
@@ -420,17 +424,20 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
         )
         writer.attach([render_product])
 
+    # Disable automatic capture-on-play (we control capture via step())
+    rep.orchestrator.set_capture_on_play(False)
+
+    # Warm up the renderer so annotator buffers are initialized
+    for _ in range(5):
+        simulation_app.update()
+
     print(">>> Starting synthetic generation for this scene...")
-    rep.orchestrator.run()
-    
-    # Wait until orchestrator starts and finishes
-    while not rep.orchestrator.get_is_started():
-        simulation_app.update()
-    while rep.orchestrator.get_is_started():
-        simulation_app.update()
-        
+    for frame_i in range(frames_for_this_scene):
+        print(f">>>   Capturing frame {frame_i + 1}/{frames_for_this_scene}...")
+        rep.orchestrator.step(rt_subframes=4, delta_time=0.0)
+
     print(">>> Generation finished for this scene. Waiting for disk dispatch...")
-    rep.BackendDispatch.wait_until_done()
+    rep.orchestrator.wait_until_complete()
 
 # 6. Consolidate and clean up the temporary directories
 consolidate_datasets(output_directory, num_scenes)

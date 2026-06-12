@@ -3,3 +3,5 @@ __pycache__/
 .marimo/
 *.pyc
 .uv/
+
+_output_dataset_picanol

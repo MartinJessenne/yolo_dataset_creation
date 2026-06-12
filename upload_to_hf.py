@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
+# /// script
+# dependencies = [
+#   "huggingface-hub",
+# ]
+# ///
 """
 Upload script for pushing cart docking perception datasets to Hugging Face Hub.
-Requires: pip install huggingface_hub
+Use with the command line : uv run upload_to_hf.py --dataset_dir ./_output_dataset_picanol --token <YOUR_HF_WRITE_TOKEN>
 """
 
 import os
