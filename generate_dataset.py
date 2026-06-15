@@ -370,42 +370,37 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
                 clutter_prims.append(prim)
                 print(f">>> Loaded clutter prop: {url} (instance {i})")
 
-        # Define Frame Randomizer Function (Updates all poses & lighting)
-        def randomize_scene():
-            with cart:
-                rep.modify.pose(
-                    position=rep.distribution.sequence(cart_positions),
-                    rotation=rep.distribution.sequence(cart_rotations),
-                )
-            with look_at_target:
-                rep.modify.pose(
-                    position=rep.distribution.sequence(look_at_positions),
-                )
-            with camera:
-                rep.modify.pose(
-                    position=rep.distribution.sequence(camera_positions),
-                    look_at=look_at_target,
-                )
-            for j, prim in enumerate(clutter_prims):
-                with prim:
-                    rep.modify.pose(
-                        position=rep.distribution.sequence(clutter_positions[j]),
-                        rotation=rep.distribution.uniform((0, 0, 0), (0, 0, 360)),
-                    )
-            with domelight:
-                rep.modify.attribute("inputs:intensity", rep.distribution.uniform(100.0, 2500.0))
-                rep.modify.attribute("inputs:color", rep.distribution.uniform((0.5, 0.5, 0.5), (1.0, 1.0, 1.0)))
-            with distantlight:
-                rep.modify.attribute("inputs:intensity", rep.distribution.uniform(1000.0, 5000.0))
-                rep.modify.attribute("inputs:color", rep.distribution.uniform((0.6, 0.6, 0.6), (1.0, 1.0, 1.0)))
-                rep.modify.pose(rotation=rep.distribution.uniform((0, 0, 0), (360, 360, 360)))
-            return cart.node
-
-        # Register the randomizer (triggered explicitly via orchestrator.step())
-        rep.randomizer.register(randomize_scene)
-
-        with rep.trigger.on_frame(num_frames=1):
-            rep.randomizer.randomize_scene()
+    # ── Frame Trigger: Directly wire all distributions to the trigger ──────────
+    # All rep.modify / rep.distribution calls are placed directly inside the
+    # trigger block so that every distribution node's execution port is wired
+    # to the trigger, ensuring re-sampling on each captured frame.
+    with rep.trigger.on_frame(max_execs=NUM_FRAMES):
+        with cart:
+            rep.modify.pose(
+                position=rep.distribution.sequence(cart_positions),
+                rotation=rep.distribution.sequence(cart_rotations),
+            )
+        with look_at_target:
+            rep.modify.pose(
+                position=rep.distribution.sequence(look_at_positions),
+            )
+        with camera:
+            rep.modify.pose(
+                position=rep.distribution.sequence(camera_positions),
+                look_at=look_at_target,
+            )
+        with clutter_group:
+            rep.modify.pose(
+                position=rep.distribution.uniform((-5.0, -5.0, 0.0), (5.0, 5.0, 0.0)),
+                rotation=rep.distribution.uniform((0, 0, 0), (0, 0, 360)),
+            )
+        with domelight:
+            rep.modify.attribute("inputs:intensity", rep.distribution.uniform(100.0, 2500.0))
+            rep.modify.attribute("inputs:color", rep.distribution.uniform((0.5, 0.5, 0.5), (1.0, 1.0, 1.0)))
+        with distantlight:
+            rep.modify.attribute("inputs:intensity", rep.distribution.uniform(1000.0, 5000.0))
+            rep.modify.attribute("inputs:color", rep.distribution.uniform((0.6, 0.6, 0.6), (1.0, 1.0, 1.0)))
+            rep.modify.pose(rotation=rep.distribution.uniform((0, 0, 0), (360, 360, 360)))
 
         render_product = rep.create.render_product(camera, resolution=(800, 1280))
         
