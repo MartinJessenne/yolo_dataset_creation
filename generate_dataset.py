@@ -23,7 +23,7 @@ sys.argv.append("--/log/consoleLogLevel=verbose")
 sys.argv.append("--/log/fileLogLevel=verbose")
 
 # Force RTX Real-Time 2.0 (path-tracing based) renderer before SimulationApp initializes.
-# Isaac Sim 6.0 no longer supports traditional rasterization (RaytracedLighting).
+# Isaac Sim 4.5 uses path-tracing based rendering (RaytracedLighting is deprecated).
 # Both Real-Time 2.0 and Interactive modes use a path-tracing based core.
 sys.argv.append("--/rtx/rendermode=RealTimePathTracing")
 
@@ -370,44 +370,46 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
                 clutter_prims.append(prim)
                 print(f">>> Loaded clutter prop: {url} (instance {i})")
 
-    # ── Frame Trigger: Directly wire all distributions to the trigger ──────────
-    # All rep.modify / rep.distribution calls are placed directly inside the
-    # trigger block so that every distribution node's execution port is wired
-    # to the trigger, ensuring re-sampling on each captured frame.
-    with rep.trigger.on_frame(max_execs=NUM_FRAMES):
-        with cart:
-            rep.modify.pose(
-                position=rep.distribution.sequence(cart_positions),
-                rotation=rep.distribution.sequence(cart_rotations),
-            )
-        with look_at_target:
-            rep.modify.pose(
-                position=rep.distribution.sequence(look_at_positions),
-            )
-        with camera:
-            rep.modify.pose(
-                position=rep.distribution.sequence(camera_positions),
-                look_at=look_at_target,
-            )
-        with clutter_group:
-            rep.modify.pose(
-                position=rep.distribution.uniform((-5.0, -5.0, 0.0), (5.0, 5.0, 0.0)),
-                rotation=rep.distribution.uniform((0, 0, 0), (0, 0, 360)),
-            )
-        with domelight:
-            rep.modify.attribute("inputs:intensity", rep.distribution.uniform(100.0, 2500.0))
-            rep.modify.attribute("inputs:color", rep.distribution.uniform((0.5, 0.5, 0.5), (1.0, 1.0, 1.0)))
-        with distantlight:
-            rep.modify.attribute("inputs:intensity", rep.distribution.uniform(1000.0, 5000.0))
-            rep.modify.attribute("inputs:color", rep.distribution.uniform((0.6, 0.6, 0.6), (1.0, 1.0, 1.0)))
-            rep.modify.pose(rotation=rep.distribution.uniform((0, 0, 0), (360, 360, 360)))
+        # ── Frame Trigger: Directly wire distributions to the trigger ───────
+        # All rep.modify / rep.distribution calls are placed directly inside
+        # the trigger block so that every distribution node's execution port
+        # is wired to the trigger, ensuring re-sampling on each frame.
+        with rep.trigger.on_frame(max_execs=frames_for_this_scene):
+            with cart:
+                rep.modify.pose(
+                    position=rep.distribution.sequence(cart_positions),
+                    rotation=rep.distribution.sequence(cart_rotations),
+                )
+            with look_at_target:
+                rep.modify.pose(
+                    position=rep.distribution.sequence(look_at_positions),
+                )
+            with camera:
+                rep.modify.pose(
+                    position=rep.distribution.sequence(camera_positions),
+                    look_at=look_at_target,
+                )
+            # Per-distractor placement using pre-computed collision-free positions
+            for j, clutter_prim in enumerate(clutter_prims):
+                with clutter_prim:
+                    rep.modify.pose(
+                        position=rep.distribution.sequence(clutter_positions[j]),
+                        rotation=rep.distribution.uniform((0, 0, 0), (0, 0, 360)),
+                    )
+            with domelight:
+                rep.modify.attribute("inputs:intensity", rep.distribution.uniform(100.0, 2500.0))
+                rep.modify.attribute("inputs:color", rep.distribution.uniform((0.5, 0.5, 0.5), (1.0, 1.0, 1.0)))
+            with distantlight:
+                rep.modify.attribute("inputs:intensity", rep.distribution.uniform(1000.0, 5000.0))
+                rep.modify.attribute("inputs:color", rep.distribution.uniform((0.6, 0.6, 0.6), (1.0, 1.0, 1.0)))
+                rep.modify.pose(rotation=rep.distribution.uniform((0, 0, 0), (360, 360, 360)))
 
         render_product = rep.create.render_product(camera, resolution=(800, 1280))
-        
+
         # Configure output directory for the current scene (temporary directory)
         scene_output_directory = os.path.abspath(f"{output_directory}_temp_scene_{scene_idx}")
         print(f">>> Configured scene temporary output directory: {scene_output_directory}")
-        
+
         writer = rep.writers.get("BasicWriter")
         writer.initialize(
             output_dir=scene_output_directory,
