@@ -72,7 +72,7 @@ except Exception as e:
 import omni.usd
 import omni.replicator.core as rep
 from omni.isaac.core.utils.semantics import add_update_semantics
-from pxr import UsdShade
+from pxr import Sdf, UsdShade
 
 # Enable the asset converter extension using Isaac Sim utility
 from omni.isaac.core.utils.extensions import enable_extension
@@ -91,7 +91,7 @@ class MultiModalRawWriter(Writer):
 
         # Register the five annotators
         self.annotators.append(AnnotatorRegistry.get_annotator("rgb"))
-        self.annotators.append(AnnotatorRegistry.get_annotator("semantic_segmentation"))   
+        self.annotators.append(AnnotatorRegistry.get_annotator("semantic_segmentation", init_params={"colorize": True}))   
         self.annotators.append(AnnotatorRegistry.get_annotator("distance_to_image_plane")) # Enable depth map generation (meters, float32, .npy)
         self.annotators.append(AnnotatorRegistry.get_annotator("bounding_box_3d"))         # 3D OBB corners + world transform → 6D pose GT
         self.annotators.append(AnnotatorRegistry.get_annotator("camera_params"))           # Intrinsics K per frame (needed for projection)
@@ -158,16 +158,23 @@ class MultiModalRawWriter(Writer):
                                                                                                                                                                                                         
         self._frame_id += 1                                                                                                                                                                           
                                                                                                                                                                                                           
-    def _make_serializable(self, obj):                                                                                                                                                                
-        if isinstance(obj, dict):                                                                                                                                                                     
-            return {k: self._make_serializable(v) for k, v in obj.items()}                                                                                                                            
-        elif isinstance(obj, list):                                                                                                                                                                   
-            return [self._make_serializable(v) for v in obj]                                                                                                                                          
-        elif isinstance(obj, np.ndarray):                                                                                                                                                             
-            return obj.tolist()                                                                                                                                                                       
-        elif hasattr(obj, "tolist"):                                                                                                                                                                  
-            return obj.tolist()                                                                                                                                                                       
-        else:                                                                                                                                                                                         
+    def _make_serializable(self, obj):
+        if isinstance(obj, dict):
+            return {k: self._make_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._make_serializable(v) for v in obj]
+        elif isinstance(obj, np.ndarray):
+            if obj.dtype.names is not None:
+                return [self._make_serializable(dict(zip(obj.dtype.names, record))) for record in obj]
+            else:
+                return obj.tolist()
+        elif isinstance(obj, (np.float32, np.float64)):
+            return float(obj)
+        elif isinstance(obj, (np.int32, np.int64)):
+            return int(obj)
+        elif hasattr(obj, "tolist"):
+            return obj.tolist()
+        else:
             return obj 
 
 WriterRegistry.register(MultiModalRawWriter)
@@ -246,40 +253,53 @@ def consolidate_datasets(output_dir, num_scenes):
     os.makedirs(output_dir, exist_ok=True)
     global_frame_idx = 0
     
+    subdirs = ["rgb", "depth", "semantic", "bbox_3d", "camera"]
+    
     for scene_idx in range(num_scenes):
         temp_dir = os.path.abspath(f"{output_dir}_temp_scene_{scene_idx}")
         if not os.path.exists(temp_dir):
             continue
             
         print(f">>> Consolidating temporary files from: {temp_dir}")
-        for root, dirs, files in os.walk(temp_dir):
-            print(f">>> Found {len(files)} files in: {root}")
-            frame_files = {}
-            for file in files:
-                name, ext = os.path.splitext(file)
-                parts = name.split('_')
-                if len(parts) > 0 and parts[-1].isdigit():
-                    idx = int(parts[-1])
-                    prefix = '_'.join(parts[:-1])
-                else:
-                    idx = 0
-                    prefix = name
-                if idx not in frame_files:
-                    frame_files[idx] = []
-                frame_files[idx].append((prefix, ext, file, os.path.join(root, file)))
+        rgb_scene_dir = os.path.join(temp_dir, "rgb")
+        if not os.path.exists(rgb_scene_dir):
+            continue
             
-            for local_idx in sorted(frame_files.keys()):
-                for prefix, file_ext, original_file, src_path in frame_files[local_idx]:
-                    new_filename = f"{prefix}_{global_frame_idx:04d}{file_ext}"
-                    rel_path = os.path.relpath(src_path, temp_dir)
-                    rel_dir = os.path.dirname(rel_path)
+        # Get all local indices that have rgb files
+        local_indices = []
+        for file in os.listdir(rgb_scene_dir):
+            name, ext = os.path.splitext(file)
+            parts = name.split('_')
+            if len(parts) > 0 and parts[-1].isdigit():
+                local_indices.append(int(parts[-1]))
+                
+        local_indices.sort()
+        print(f">>> Found local frame indices: {local_indices}")
+        
+        for local_idx in local_indices:
+            for subdir in subdirs:
+                subdir_path = os.path.join(temp_dir, subdir)
+                if not os.path.exists(subdir_path):
+                    continue
+                
+                prefix_exact = f"frame_{local_idx:04d}"
+                for file in os.listdir(subdir_path):
+                    name, ext = os.path.splitext(file)
+                    if name == prefix_exact:
+                        new_name = f"frame_{global_frame_idx:04d}{ext}"
+                    elif name.startswith(prefix_exact + "_"):
+                        suffix = name[len(prefix_exact):]
+                        new_name = f"frame_{global_frame_idx:04d}{suffix}{ext}"
+                    else:
+                        continue
                     
-                    dest_dir = os.path.join(output_dir, rel_dir)
+                    src_path = os.path.join(subdir_path, file)
+                    dest_dir = os.path.join(output_dir, subdir)
                     os.makedirs(dest_dir, exist_ok=True)
-                    
-                    dest_path = os.path.join(dest_dir, new_filename)
+                    dest_path = os.path.join(dest_dir, new_name)
                     shutil.move(src_path, dest_path)
-                global_frame_idx += 1
+            
+            global_frame_idx += 1
                 
         # Clean up temp folder
         try:
@@ -439,13 +459,13 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
         )
 
         # Bind the material to all cart mesh prims via USD MaterialBindingAPI
-        cart_mat_path = rep.utils.get_node_targets(cart_material.node, "inputs:prims")[0]
+        cart_mat_path = Sdf.Path(str(cart_material.get_outputs()["prims"][0]))
         cart_mat_prim = stage.GetPrimAtPath(cart_mat_path)
         cart_mat_shade = UsdShade.Material(cart_mat_prim)
         for prim in stage.Traverse():
             if prim.GetName() in CART_SEMANTIC_MAP:
                 binding_api = UsdShade.MaterialBindingAPI.Apply(prim)
-                binding_api.Bind(cart_mat_shade)
+                binding_api.Bind(cart_mat_shade, bindingStrength=UsdShade.Tokens.strongerThanDescendants)
                 print(f">>> Metallic material bound to: {prim.GetPath()}")
         
         # Force real-time compute denoisers since NGX (DLSS/OptiX) fails headlessly
