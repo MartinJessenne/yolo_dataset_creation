@@ -72,11 +72,105 @@ except Exception as e:
 import omni.usd
 import omni.replicator.core as rep
 from omni.isaac.core.utils.semantics import add_update_semantics
+from pxr import UsdShade
 
 # Enable the asset converter extension using Isaac Sim utility
 from omni.isaac.core.utils.extensions import enable_extension
+from omni.replicator.core import Writer, WriterRegistry, AnnotatorRegistry
 enable_extension("omni.kit.asset_converter")
 import omni.kit.asset_converter
+import json
+import numpy as np 
+from PIL import Image
+
+# 2. (AGENT: update comment numerotation) Instantiate the custom writer
+class MultiModalRawWriter(Writer):
+    def __init__(self, output_dir: str):
+        self._output_dir = output_dir
+        self._frame_id = 0
+
+        # Register the five annotators
+        self.annotators.append(AnnotatorRegistry.get_annotator("rgb"))
+        self.annotators.append(AnnotatorRegistry.get_annotator("semantic_segmentation"))   
+        self.annotators.append(AnnotatorRegistry.get_annotator("distance_to_image_plane")) # Enable depth map generation (meters, float32, .npy)
+        self.annotators.append(AnnotatorRegistry.get_annotator("bounding_box_3d"))         # 3D OBB corners + world transform → 6D pose GT
+        self.annotators.append(AnnotatorRegistry.get_annotator("camera_params"))           # Intrinsics K per frame (needed for projection)
+
+        # Setup separate folder paths
+        self.rgb_dir = os.path.join(output_dir, "rgb")
+        self.depth_dir = os.path.join(output_dir, "depth")
+        self.sem_dir = os.path.join(output_dir, "semantic")
+        self.bbox_3d_dir= os.path.join(output_dir, "bbox_3d")
+        self.cam_dir= os.path.join(output_dir, "camera")
+
+        for d in [self.rgb_dir, self.depth_dir, self.sem_dir, self.bbox_3d_dir, self.cam_dir]:
+            os.makedirs(d, exist_ok=True)
+
+    def write(self, data):
+        # Retrieve raw arrays and dictionaries
+        rgb_data = None
+        depth_data = None
+        sem_data = None
+        bbox3d_data = None
+        camera_data = None
+
+        for key in data.keys():                                                                                                                                                                       
+            if key.startswith("rgb"):                                                                                                                                                                 
+                rgb_data = data[key]                                                                                                                                                                  
+            elif key.startswith("semantic_segmentation"):                                                                                                                                             
+                sem_data = data[key]                                                                                                                                                                  
+            elif key.startswith("distance_to_image_plane"):                                                                                                                                           
+                depth_data = data[key]                                                                                                                                                                
+            elif key.startswith("bounding_box_3d"):                                                                                                                                                   
+                bbox3d_data = data[key]                                                                                                                                                               
+            elif key.startswith("camera_params"):                                                                                                                                                     
+                camera_data = data[key]
+
+        # 4. Save RGB image to images/                                                                                                                                                                
+        if rgb_data is not None:                                                                                                                                                                      
+            img = Image.fromarray(rgb_data, "RGBA")                                                                                                                                                   
+            img.save(os.path.join(self.rgb_dir, f"frame_{self._frame_id:04d}.png"))                                                                                                                
+                                                                                                                                                                                                        
+        # 5. Save Depth map to depth/                                                                                                                                                                 
+        if depth_data is not None:                                                                                                                                                                    
+            np.save(os.path.join(self.depth_dir, f"frame_{self._frame_id:04d}.npy"), depth_data)                                                                                                      
+                                                                                                                                                                                                        
+        # 6. Save Semantic segmentation map to semantic_segmentation/                                                                                                                                 
+        if sem_data is not None:                                                                                                                                                                      
+            sem_img = Image.fromarray(sem_data["data"])                                                                                                                                               
+            sem_img.save(os.path.join(self.sem_dir, f"frame_{self._frame_id:04d}.png"))                                                                                                               
+                                                                                                                                                                                                        
+            # Save semantic class mapping mapping (idToLabels)                                                                                                                                        
+            with open(os.path.join(self.sem_dir, f"frame_{self._frame_id:04d}_labels.json"), "w") as f:                                                                                               
+                json.dump(sem_data["info"]["idToLabels"], f, indent=4)                                                                                                                                
+                                                                                                                                                                                                        
+        # 7. Save 3D Bounding Boxes to bounding_box_3d/                                                                                                                                               
+        if bbox3d_data is not None:                                                                                                                                                                   
+            serializable_bbox = self._make_serializable(bbox3d_data)                                                                                                                                  
+            with open(os.path.join(self.bbox_3d_dir, f"frame_{self._frame_id:04d}.json"), "w") as f:                                                                                                     
+                json.dump(serializable_bbox, f, indent=4)                                                                                                                                             
+                                                                                                                                                                                                        
+        # 8. Save Camera Parameters to camera_params/                                                                                                                                                 
+        if camera_data is not None:                                                                                                                                                                   
+            serializable_cam = self._make_serializable(camera_data)                                                                                                                                   
+            with open(os.path.join(self.cam_dir, f"frame_{self._frame_id:04d}.json"), "w") as f:                                                                                                      
+                json.dump(serializable_cam, f, indent=4)                                                                                                                                              
+                                                                                                                                                                                                        
+        self._frame_id += 1                                                                                                                                                                           
+                                                                                                                                                                                                          
+    def _make_serializable(self, obj):                                                                                                                                                                
+        if isinstance(obj, dict):                                                                                                                                                                     
+            return {k: self._make_serializable(v) for k, v in obj.items()}                                                                                                                            
+        elif isinstance(obj, list):                                                                                                                                                                   
+            return [self._make_serializable(v) for v in obj]                                                                                                                                          
+        elif isinstance(obj, np.ndarray):                                                                                                                                                             
+            return obj.tolist()                                                                                                                                                                       
+        elif hasattr(obj, "tolist"):                                                                                                                                                                  
+            return obj.tolist()                                                                                                                                                                       
+        else:                                                                                                                                                                                         
+            return obj 
+
+WriterRegistry.register(MultiModalRawWriter)
 
 # 2. Resolve target USD cart model path
 if CART_TYPE == "colruyt":
@@ -333,6 +427,26 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
             if label:
                 add_update_semantics(prim, semantic_label=label, type_label="class")
                 print(f">>> Semantic applied: '{label}' → {prim.GetPath()}")
+
+        # ── Apply randomized metallic OmniPBR material to the cart ────────────
+        # Simulates the real bare-metal industrial cart frame with per-frame
+        # variation in metallic sheen, surface roughness, and grey tint
+        # (age, dirt, oxidation) to improve sim-to-real domain transfer.
+        cart_material = rep.create.material_omnipbr(
+            diffuse=rep.distribution.uniform((0.4, 0.4, 0.4), (0.7, 0.7, 0.7)),
+            metallic=rep.distribution.uniform(0.7, 1.0),
+            roughness=rep.distribution.uniform(0.1, 0.45),
+        )
+
+        # Bind the material to all cart mesh prims via USD MaterialBindingAPI
+        cart_mat_path = rep.utils.get_node_targets(cart_material.node, "inputs:prims")[0]
+        cart_mat_prim = stage.GetPrimAtPath(cart_mat_path)
+        cart_mat_shade = UsdShade.Material(cart_mat_prim)
+        for prim in stage.Traverse():
+            if prim.GetName() in CART_SEMANTIC_MAP:
+                binding_api = UsdShade.MaterialBindingAPI.Apply(prim)
+                binding_api.Bind(cart_mat_shade)
+                print(f">>> Metallic material bound to: {prim.GetPath()}")
         
         # Force real-time compute denoisers since NGX (DLSS/OptiX) fails headlessly
         rep.settings.carb_settings("/rtx/indirectDiffuse/denoiser/enabled", True)
@@ -410,14 +524,9 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
         scene_output_directory = os.path.abspath(f"{output_directory}_temp_scene_{scene_idx}")
         print(f">>> Configured scene temporary output directory: {scene_output_directory}")
 
-        writer = rep.writers.get("BasicWriter")
+        writer = rep.WriterRegistry.get("MultiModalRawWriter")
         writer.initialize(
             output_dir=scene_output_directory,
-            rgb=True,
-            semantic_segmentation=True,
-            distance_to_image_plane=True,  # Enable depth map generation (meters, float32, .npy)
-            bounding_box_3d=True,          # 3D OBB corners + world transform → 6D pose GT
-            camera_params=True,            # Intrinsics K per frame (needed for projection)
         )
         writer.attach([render_product])
 
