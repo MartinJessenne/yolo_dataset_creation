@@ -85,8 +85,9 @@ from PIL import Image
 
 # 2. (AGENT: update comment numerotation) Instantiate the custom writer
 class MultiModalRawWriter(Writer):
-    def __init__(self, output_dir: str):
-        self._output_dir = output_dir
+    def __init__(self, output_dir: str = None, **kwargs):
+        print(f">>> MultiModalRawWriter.__init__ called with output_dir={output_dir}, kwargs={kwargs}")
+        super().__init__()
         self._frame_id = 0
 
         # Register the five annotators
@@ -96,18 +97,26 @@ class MultiModalRawWriter(Writer):
         self.annotators.append(AnnotatorRegistry.get_annotator("bounding_box_3d"))         # 3D OBB corners + world transform → 6D pose GT
         self.annotators.append(AnnotatorRegistry.get_annotator("camera_params"))           # Intrinsics K per frame (needed for projection)
 
+    def initialize(self, output_dir: str, **kwargs):
+        print(f">>> MultiModalRawWriter.initialize called with output_dir={output_dir}, kwargs={kwargs}")
+        self._output_dir = output_dir
+        self._frame_id = 0
+
         # Setup separate folder paths
         self.rgb_dir = os.path.join(output_dir, "rgb")
         self.depth_dir = os.path.join(output_dir, "depth")
         self.sem_dir = os.path.join(output_dir, "semantic")
         self.sem_labels_dir = os.path.join(output_dir, "semantic_labels")
-        self.bbox_3d_dir= os.path.join(output_dir, "bbox_3d")
-        self.cam_dir= os.path.join(output_dir, "camera")
+        self.bbox_3d_dir = os.path.join(output_dir, "bbox_3d")
+        self.cam_dir = os.path.join(output_dir, "camera")
 
         for d in [self.rgb_dir, self.depth_dir, self.sem_dir, self.sem_labels_dir, self.bbox_3d_dir, self.cam_dir]:
             os.makedirs(d, exist_ok=True)
 
+        super().initialize(output_dir=output_dir, **kwargs)
+
     def write(self, data):
+        print(f">>> MultiModalRawWriter.write called with frame_id={self._frame_id}")
         # Retrieve raw arrays and dictionaries
         rgb_data = None
         depth_data = None
@@ -147,9 +156,39 @@ class MultiModalRawWriter(Writer):
                                                                                                                                                                                                         
         # 7. Save 3D Bounding Boxes to bounding_box_3d/                                                                                                                                               
         if bbox3d_data is not None:                                                                                                                                                                   
-            serializable_bbox = self._make_serializable(bbox3d_data)                                                                                                                                  
+            serializable_bbox = self._make_serializable(bbox3d_data)
+            id_to_labels = serializable_bbox.get("info", {}).get("idToLabels", {})
+            prim_paths = serializable_bbox.get("info", {}).get("primPaths", [])
+            
+            final_data = []
+            new_prim_paths = []
+            
+            for i, box in enumerate(serializable_bbox.get("data", [])):
+                sem_id = box.get("semanticId")
+                label_info = id_to_labels.get(str(sem_id), {})
+                prim_path = prim_paths[i] if i < len(prim_paths) else ""
+                
+                if label_info.get("class") == "cart" and prim_path.startswith("/Replicator"):
+                    # Keep this bounding box, mapping its semanticId to 0 (cart)
+                    box_copy = box.copy()
+                    box_copy["semanticId"] = 0
+                    final_data.append(box_copy)
+                    new_prim_paths.append(prim_path)
+            
+            filtered_bbox = {
+                "data": final_data,
+                "info": {
+                    "primPaths": new_prim_paths,
+                    "idToLabels": {
+                        "0": {
+                            "class": "cart"
+                        }
+                    }
+                }
+            }
+            
             with open(os.path.join(self.bbox_3d_dir, f"frame_{self._frame_id:04d}.json"), "w") as f:                                                                                                     
-                json.dump(serializable_bbox, f, indent=4)                                                                                                                                             
+                json.dump(filtered_bbox, f, indent=4)                                                                                                                                             
                                                                                                                                                                                                         
         # 8. Save Camera Parameters to camera_params/                                                                                                                                                 
         if camera_data is not None:                                                                                                                                                                   
@@ -434,31 +473,29 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
         # Pump the app once so the USD reference is fully resolved in the stage
         simulation_app.update()
 
-        # Apply top-level semantic label to the cart references
-        stage = omni.usd.get_context().get_stage()
-        cart_prims = cart.get_outputs()["prims"]
-        for prim_path in cart_prims:
-            prim = stage.GetPrimAtPath(prim_path)
-            if prim:
-                add_update_semantics(prim, semantic_label="cart", type_label="class")
-                print(f">>> Top-level Semantic applied: 'cart' → {prim.GetPath()}")
-
         # ── Apply randomized metallic OmniPBR material to the cart ────────────
         # Simulates the real bare-metal industrial cart frame with per-frame
         # variation in metallic sheen, surface roughness, and grey tint
         # (age, dirt, oxidation) to improve sim-to-real domain transfer.
+        greys = [(float(g), float(g), float(g)) for g in np.linspace(0.4, 0.7, 50)]
         cart_material = rep.create.material_omnipbr(
-            diffuse=rep.distribution.uniform((0.4, 0.4, 0.4), (0.7, 0.7, 0.7)),
+            diffuse=rep.distribution.choice(greys),
             metallic=rep.distribution.uniform(0.7, 1.0),
             roughness=rep.distribution.uniform(0.1, 0.45),
         )
 
-        # Bind the material to all cart mesh prims via USD MaterialBindingAPI
+        # Apply top-level semantic label using Replicator's modify API
+        with cart:
+            rep.modify.semantics([("class", "cart")])
+
+        # Bind the material to all cart mesh prims via USD MaterialBindingAPI with strongerThanDescendants
+        stage = omni.usd.get_context().get_stage()
+        cart_prims = cart.get_outputs()["prims"]
         cart_mat_path = Sdf.Path(str(cart_material.get_outputs()["prims"][0]))
         cart_mat_prim = stage.GetPrimAtPath(cart_mat_path)
         cart_mat_shade = UsdShade.Material(cart_mat_prim)
         for prim_path in cart_prims:
-            prim = stage.GetPrimAtPath(prim_path)
+            prim = stage.GetPrimAtPath(Sdf.Path(str(prim_path)))
             if prim:
                 binding_api = UsdShade.MaterialBindingAPI.Apply(prim)
                 binding_api.Bind(cart_mat_shade, bindingStrength=UsdShade.Tokens.strongerThanDescendants)
@@ -560,6 +597,10 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
 
     print(">>> Generation finished for this scene. Waiting for disk dispatch...")
     rep.orchestrator.wait_until_complete()
+
+    # Detach writer and destroy render product to clean up resources between stages
+    writer.detach()
+    render_product.destroy()
 
 # 6. Consolidate and clean up the temporary directories
 consolidate_datasets(output_directory, num_scenes)
