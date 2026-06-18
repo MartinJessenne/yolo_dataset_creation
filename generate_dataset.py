@@ -209,14 +209,7 @@ WAREHOUSE_SCENES = [
     f"{ISAAC_ASSETS}/Environments/Simple_Warehouse/full_warehouse.usd",
 ]
 
-# Part name → semantic class label mapping
-# Must match the Blender object names used in the USD export.
-CART_SEMANTIC_MAP = {
-    "cart_body":    "cart_body",
-    "left_handle":  "left_handle",
-    "right_handle": "right_handle",
-    "colruyt_cart": "cart_body",
-}
+
 
 # Define output directory
 output_directory = os.path.abspath(f"./_output_dataset_{CART_TYPE}")
@@ -441,13 +434,14 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
         # Pump the app once so the USD reference is fully resolved in the stage
         simulation_app.update()
 
-        # Apply per-prim semantics as local stage opinions
+        # Apply top-level semantic label to the cart references
         stage = omni.usd.get_context().get_stage()
-        for prim in stage.Traverse():
-            label = CART_SEMANTIC_MAP.get(prim.GetName())
-            if label:
-                add_update_semantics(prim, semantic_label=label, type_label="class")
-                print(f">>> Semantic applied: '{label}' → {prim.GetPath()}")
+        cart_prims = cart.get_outputs()["prims"]
+        for prim_path in cart_prims:
+            prim = stage.GetPrimAtPath(prim_path)
+            if prim:
+                add_update_semantics(prim, semantic_label="cart", type_label="class")
+                print(f">>> Top-level Semantic applied: 'cart' → {prim.GetPath()}")
 
         # ── Apply randomized metallic OmniPBR material to the cart ────────────
         # Simulates the real bare-metal industrial cart frame with per-frame
@@ -463,8 +457,9 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
         cart_mat_path = Sdf.Path(str(cart_material.get_outputs()["prims"][0]))
         cart_mat_prim = stage.GetPrimAtPath(cart_mat_path)
         cart_mat_shade = UsdShade.Material(cart_mat_prim)
-        for prim in stage.Traverse():
-            if prim.GetName() in CART_SEMANTIC_MAP:
+        for prim_path in cart_prims:
+            prim = stage.GetPrimAtPath(prim_path)
+            if prim:
                 binding_api = UsdShade.MaterialBindingAPI.Apply(prim)
                 binding_api.Bind(cart_mat_shade, bindingStrength=UsdShade.Tokens.strongerThanDescendants)
                 print(f">>> Metallic material bound to: {prim.GetPath()}")
