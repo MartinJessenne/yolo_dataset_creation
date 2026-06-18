@@ -100,10 +100,11 @@ class MultiModalRawWriter(Writer):
         self.rgb_dir = os.path.join(output_dir, "rgb")
         self.depth_dir = os.path.join(output_dir, "depth")
         self.sem_dir = os.path.join(output_dir, "semantic")
+        self.sem_labels_dir = os.path.join(output_dir, "semantic_labels")
         self.bbox_3d_dir= os.path.join(output_dir, "bbox_3d")
         self.cam_dir= os.path.join(output_dir, "camera")
 
-        for d in [self.rgb_dir, self.depth_dir, self.sem_dir, self.bbox_3d_dir, self.cam_dir]:
+        for d in [self.rgb_dir, self.depth_dir, self.sem_dir, self.sem_labels_dir, self.bbox_3d_dir, self.cam_dir]:
             os.makedirs(d, exist_ok=True)
 
     def write(self, data):
@@ -140,8 +141,8 @@ class MultiModalRawWriter(Writer):
             sem_img = Image.fromarray(sem_data["data"])                                                                                                                                               
             sem_img.save(os.path.join(self.sem_dir, f"frame_{self._frame_id:04d}.png"))                                                                                                               
                                                                                                                                                                                                         
-            # Save semantic class mapping mapping (idToLabels)                                                                                                                                        
-            with open(os.path.join(self.sem_dir, f"frame_{self._frame_id:04d}_labels.json"), "w") as f:                                                                                               
+            # Save semantic class mapping mapping (idToLabels)
+            with open(os.path.join(self.sem_labels_dir, f"frame_{self._frame_id:04d}.json"), "w") as f:
                 json.dump(sem_data["info"]["idToLabels"], f, indent=4)                                                                                                                                
                                                                                                                                                                                                         
         # 7. Save 3D Bounding Boxes to bounding_box_3d/                                                                                                                                               
@@ -253,7 +254,7 @@ def consolidate_datasets(output_dir, num_scenes):
     os.makedirs(output_dir, exist_ok=True)
     global_frame_idx = 0
     
-    subdirs = ["rgb", "depth", "semantic", "bbox_3d", "camera"]
+    subdirs = ["rgb", "depth", "semantic", "semantic_labels", "bbox_3d", "camera"]
     
     for scene_idx in range(num_scenes):
         temp_dir = os.path.abspath(f"{output_dir}_temp_scene_{scene_idx}")
