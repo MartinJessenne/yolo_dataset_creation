@@ -6,9 +6,7 @@
 
 import os
 import sys
-import random
 import math
-import shutil
 import json
 
 # ─── Pre-SimulationApp Environment Configuration ───────────────────────────
@@ -26,8 +24,8 @@ sys.argv.append("--/log/level=verbose")
 sys.argv.append("--/log/consoleLogLevel=verbose")
 sys.argv.append("--/log/fileLogLevel=verbose")
 
-# Force RTX Real-Time 2.0 path-tracing renderer
-sys.argv.append("--/rtx/rendermode=RealTimePathTracing")
+# Force RTX Real-Time 2.0 ray-tracing renderer
+sys.argv.append("--/rtx/rendermode=RayTracedLighting")
 
 # ─── Parse CLI Arguments ───────────────────────────────────────────────────
 NUM_FRAMES = 5  # default for validation runs
@@ -45,7 +43,7 @@ if "--frames" in sys.argv:
 # MIGRATION 6.0: omni.isaac.kit -> isaacsim
 from isaacsim import SimulationApp
 
-simulation_app = SimulationApp({"headless": True, "renderer": "RealTimePathTracing"})
+simulation_app = SimulationApp({"headless": True, "renderer": "RayTracedLighting"})
 
 
 # ─── Omniverse Imports ────────────────────────────────────────────────────
@@ -53,9 +51,9 @@ import omni.usd
 import omni.replicator.core as rep
 
 # MIGRATION 6.0: omni.isaac.core.utils -> isaacsim.core.utils
-from isaacsim.core.utils.semantics import add_labels, upgrade_prim_semantics_to_labels
+from isaacsim.core.experimental.utils.semantics import add_labels, upgrade_prim_semantics_to_labels
 from isaacsim.core.utils.extensions import enable_extension
-from isaacsim.core.utils.nucleus import get_assets_root_path
+from isaacsim.storage.native import get_assets_root_path
 
 from isaacsim.sensors.experimental.rtx import RtxCamera, SingleViewDepthCameraSensor
 
@@ -63,9 +61,6 @@ from omni.replicator.core import Writer, WriterRegistry, AnnotatorRegistry
 from pxr import Sdf, UsdShade, Usd
 import numpy as np
 from PIL import Image
-
-enable_extension("omni.kit.asset_converter")
-import omni.kit.asset_converter
 
 # ─── Constants ─────────────────────────────────────────────────────────────
 
@@ -298,32 +293,35 @@ WriterRegistry.register(MultiModalRawWriter)
 # Utility Functions
 # ═══════════════════════════════════════════════════════════════════════════
 
-def find_child_prim(stage, root_path, target_name):
-    """Find first descendant prim with the given name under root_path."""
-    root_prim = stage.GetPrimAtPath(root_path)
-    if not root_prim:
+def get_path_str(obj):
+    if hasattr(obj, 'GetPath'):
+        return str(obj.GetPath())
+    return str(obj)
+
+def find_child_prim(stage, root_prim_or_path, target_name):
+    """Find first descendant prim with the given name under root_prim_or_path."""
+    path_str = get_path_str(root_prim_or_path)
+    root_prim = stage.GetPrimAtPath(path_str)
+    
+    print(f">>> find_child_prim called for: {path_str}")
+    print(f"    root_prim: {root_prim}")
+    if root_prim:
+        print(f"    IsValid: {root_prim.IsValid()}")
+        print(f"    Children: {[c.GetName() for c in root_prim.GetChildren()]}")
+
+    if not root_prim or not root_prim.IsValid():
         return None
-    for prim in Usd.PrimRange(root_prim):
-        if prim.GetName() == target_name:
-            return prim
-    return None
-
-
-def get_distance_to_segment(p, a, b):
-    """Compute minimum distance from point p to line segment AB (2D)."""
-    ax, ay = a
-    bx, by = b
-    px, py = p
-
-    ab_x, ab_y = bx - ax, by - ay
-    ab_len_sq = ab_x**2 + ab_y**2
-    if ab_len_sq == 0:
-        return math.sqrt((px - ax)**2 + (py - ay)**2)
-
-    t = max(0.0, min(1.0, ((px - ax) * ab_x + (py - ay) * ab_y) / ab_len_sq))
-    proj_x = ax + t * ab_x
-    proj_y = ay + t * ab_y
-    return math.sqrt((px - proj_x)**2 + (py - proj_y)**2)
+        
+    def _search(p):
+        if p.GetName() == target_name:
+            return p
+        for child in p.GetChildren():
+            found = _search(child)
+            if found:
+                return found
+        return None
+        
+    return _search(root_prim)
 
 
 
@@ -350,6 +348,12 @@ for idx, url in enumerate(WAREHOUSE_SCENES):
 # Main Generation Loop
 # ═══════════════════════════════════════════════════════════════════════════
 
+# Seed the randomizer to make sampling reproducible
+rng = rep.rng.ReplicatorRNG(seed=42)
+
+# Set Replicator to require explicit step() calls to capture
+rep.orchestrator.set_capture_on_play(False)
+
 for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
     frames_for_this_scene = scene_frame_counts[scene_idx]
     if frames_for_this_scene <= 0:
@@ -358,306 +362,295 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
     print(f"\n>>> {'═' * 60}")
     print(f">>>  SCENE {scene_idx + 1}/{num_scenes}: {os.path.basename(warehouse_url)}")
     print(f">>>  FRAMES: {frames_for_this_scene}")
-    print(f">>> {'═' * 60}")
-
+    # Load warehouse environment
     omni.usd.get_context().open_stage(warehouse_url)
+    
+    # Wait for stage to fully load asynchronously
+    while omni.usd.get_context().get_stage_state() != omni.usd.StageState.OPENED:
+        simulation_app.update()
 
-    # ── Generate per-frame sequences ──────────────────────────────────────
+    stage = omni.usd.get_context().get_stage()
 
-    cart_positions = []
-    cart_rotations = []
-    camera_positions = []
-    look_at_positions = []
+    # ── Setup Scene Assets and Prims ──────────────────────────────────────
+    rep.functional.create.xform(name="Replicator")
+    rep.functional.create.scope(name="Carts", parent="/Replicator")
 
-    # Cart type selection and visibility sequences
-    cart_choices = []
-    visibility_seqs = {ct: [] for ct in CART_TYPES}
+    # Load all 3 cart USD models
+    cart_handles = {}
+    for ct in CART_TYPES:
+        cart_handles[ct] = rep.functional.create.reference(
+            usd_path="file://" + CART_USD_PATHS[ct],
+            parent="/Replicator/Carts",
+            name=f"Cart_{ct}"
+        )
+        print(f">>> Loaded cart USD: {ct}")
 
-    # Box visibility sequences (leanflow only)
-    box_viz_seqs = {"Box_0": [], "Box_1": [], "Box_2": []}
+    simulation_app.update()
 
-    # Distractor positions (6 props: 3 types × 2 instances)
-    num_distractors = 6
-    clutter_positions = [[] for _ in range(num_distractors)]
+    # Wait for USD references to resolve and populate children
+    for ct, cart_prim_path in cart_handles.items():
+        prim_path_str = get_path_str(cart_prim_path)
+        prim = stage.GetPrimAtPath(prim_path_str)
+        attempts = 0
+        while not prim.GetChildren() and attempts < 100:
+            simulation_app.update()
+            attempts += 1
+        print(f">>> Cart USD {ct} loaded in {attempts} updates. Children: {[c.GetName() for c in prim.GetChildren()]}")
 
-    for _ in range(frames_for_this_scene):
-        # 1. Random cart selection (uniform across 3 types)
-        chosen = random.choice(CART_TYPES)
-        cart_choices.append(chosen)
-        for ct in CART_TYPES:
-            visibility_seqs[ct].append(ct == chosen)
+    # Deactivate rogue cameras and lights exported inside the cart USDs to prevent lighting/camera conflicts
+    def _deactivate_rogue_prims(p):
+        prim_path = str(p.GetPath())
+        if "/Replicator/Carts/Cart_" in prim_path:
+            prim_type = p.GetTypeName()
+            if prim_type in ["Camera", "DomeLight", "DistantLight", "SphereLight", "RectLight"]:
+                p.SetActive(False)
+                print(f">>> Deactivated rogue {prim_type} at {prim_path}")
+        for child in p.GetChildren():
+            _deactivate_rogue_prims(child)
+    
+    _deactivate_rogue_prims(stage.GetPseudoRoot())
 
-        # 2. Box visibility (uniform: 0, 1, 2, or 3 boxes visible)
-        if chosen == "leanflow":
-            num_boxes = random.randint(0, 3)
-            visible_boxes = random.sample(range(3), num_boxes)
+    # Apply per-class semantic labels to CartFrame prims only
+    for class_name, cart_prim_path in cart_handles.items():
+        frame_prim = find_child_prim(stage, cart_prim_path, "CartFrame")
+        if frame_prim:
+            upgrade_prim_semantics_to_labels(frame_prim)
+            add_labels(frame_prim, labels=[class_name], taxonomy="class")
+            print(f">>> Semantic '{class_name}' -> {frame_prim.GetPath()}")
         else:
-            visible_boxes = []
-        for bi in range(3):
-            box_viz_seqs[f"Box_{bi}"].append(bi in visible_boxes)
+            print(f"WARNING: CartFrame prim not found under {cart_prim_path}")
 
-        # 3. Cart position and yaw on warehouse floor
-        cx = random.uniform(-4.0, 4.0)
-        cy = random.uniform(-4.0, 4.0)
-        cart_positions.append((cx, cy, 0.0))
+    # ── Materials Setup ───────────────────────────────────────────────────
+    # We create the material primitives first so we can bind them
+    rep.functional.create.scope(name="Materials", parent="/Replicator")
 
-        cyaw = random.uniform(0.0, 360.0)
-        cart_rotations.append((0.0, 0.0, cyaw))
+    # Metallic Cart Material
+    cart_material = rep.functional.create.material(
+        mdl="OmniPBR.mdl",
+        diffuse_color_constant=(0.5, 0.5, 0.5), # Will be randomized below
+        metallic_constant=0.85,
+        reflection_roughness_constant=0.25,
+        name="CartMetallic",
+        parent="/Replicator/Materials",
+    )
+    
+    # Box Material
+    box_material = rep.functional.create.material(
+        mdl="OmniPBR.mdl",
+        diffuse_color_constant=(0.5, 0.5, 0.5), # Will be randomized below
+        metallic_constant=0.0,
+        reflection_roughness_constant=0.6,
+        name="BoxMaterial",
+        parent="/Replicator/Materials",
+    )
+
+    cart_mat_shade = UsdShade.Material(stage.GetPrimAtPath(get_path_str(cart_material)))
+    box_mat_shade = UsdShade.Material(stage.GetPrimAtPath(get_path_str(box_material)))
+
+    # Bind materials
+    for class_name, cart_prim in cart_handles.items():
+        if class_name == "leanflow":
+            # Bind only to CartFrame (not to Box prims)
+            frame_prim = find_child_prim(stage, cart_prim, "CartFrame")
+            if frame_prim and frame_prim.IsValid():
+                api = UsdShade.MaterialBindingAPI.Apply(frame_prim)
+                api.Bind(cart_mat_shade, bindingStrength=UsdShade.Tokens.strongerThanDescendants)
+        else:
+            prim = stage.GetPrimAtPath(get_path_str(cart_prim))
+            if prim and prim.IsValid():
+                api = UsdShade.MaterialBindingAPI.Apply(prim)
+                api.Bind(cart_mat_shade, bindingStrength=UsdShade.Tokens.strongerThanDescendants)
+
+    # Box Material Binding for leanflow
+    leanflow_root = cart_handles["leanflow"]
+    box_prims = {}
+    leanflow_root_prim = stage.GetPrimAtPath(get_path_str(leanflow_root))
+    if leanflow_root_prim and leanflow_root_prim.IsValid():
+        def _find_boxes(p):
+            prim_name = p.GetName()
+            if prim_name in ["Box_0", "Box_1", "Box_2"]:
+                api = UsdShade.MaterialBindingAPI.Apply(p)
+                api.Bind(box_mat_shade, bindingStrength=UsdShade.Tokens.strongerThanDescendants)
+                box_prims[prim_name] = p
+            for child in p.GetChildren():
+                _find_boxes(child)
+        _find_boxes(leanflow_root_prim)
+
+    # ── Renderer settings (force TAA, disable OptiX denoiser) ─────────
+    rep.settings.carb_settings("/rtx/indirectDiffuse/denoiser/enabled", True)
+    rep.settings.carb_settings("/rtx/reflections/denoiser/enabled", True)
+    rep.settings.carb_settings("/rtx/post/aa/op", 1)
+    rep.settings.carb_settings("/rtx/pathtracing/optixDenoiser/enabled", False)
+    rep.settings.carb_settings("/omni/replicator/RTSubframes", 12)
+
+    # ── Scene lighting ────────────────────────────────────────────────
+    rep.functional.create.scope(name="Lights", parent="/Replicator")
+    domelight = rep.functional.create.dome_light(
+        intensity=1000.0,
+        color=(1.0, 1.0, 1.0),
+        name="DomeLight",
+        parent="/Replicator/Lights"
+    )
+    distantlight = rep.functional.create.distant_light(
+        intensity=3000.0,
+        color=(1.0, 1.0, 1.0),
+        rotation=(0, 0, 0),
+        name="DistantLight",
+        parent="/Replicator/Lights"
+    )
+
+    # ── Camera Setup (with Stereo Noise) ───────────
+    camera_mount = rep.functional.create.xform(name="camera_mount", parent="/Replicator")
+    look_at_target = rep.functional.create.xform(name="look_at_target", parent="/Replicator")
+    
+    cam_path = "/Replicator/camera_mount/StereoCamera"
+    rtx_cam = RtxCamera(
+        path=cam_path,
+    )
+    
+    rtx_cam.camera.set_focal_lengths([FOCAL_LENGTH])
+    rtx_cam.camera.set_apertures(horizontal_apertures=[HORIZ_APERTURE])
+    rtx_cam.camera.set_clipping_ranges(near_distances=[0.1], far_distances=[10000.0])
+    
+    stereo_sensor = SingleViewDepthCameraSensor(
+        path=rtx_cam,
+        resolution=(1280, 800),
+        annotators=["distance_to_image_plane"]
+    )
+    
+    rep.settings.carb_settings("/rtx/post/depthSensor/enabled", True)
+    rep.settings.carb_settings("/rtx/post/depthSensor/baseline", 0.095)
+    rep.settings.carb_settings("/rtx/post/depthSensor/rgbDepthOutputMode", 0) 
+    
+    camera = stage.GetPrimAtPath(cam_path)
+    
+    # ── Warehouse clutter props (distractors, no semantics) ───────────
+    PROPS_BASE = f"{ISAAC_ASSETS}/Environments/Simple_Warehouse/Props"
+    prop_urls = [
+        f"{PROPS_BASE}/SM_PaletteA_01.usd",
+        f"{PROPS_BASE}/SM_CardBoxD_04.usd",
+        f"{PROPS_BASE}/S_TrafficCone.usd",
+    ]
+    rep.functional.create.scope(name="Distractors", parent="/Replicator")
+    clutter_prims = []
+    for idx, url in enumerate(prop_urls):
+        for sub_idx in range(2):
+            clutter_prims.append(rep.functional.create.reference(
+                usd_path=url,
+                parent="/Replicator/Distractors",
+                name=f"Distractor_{idx}_{sub_idx}"
+            ))
+
+    # Setup scatter plane for distractors
+    scatter_plane = rep.create.plane(scale=(20.0, 20.0, 1.0), position=(0, 0, 0), visible=False, parent="/Replicator/Distractors")
+    
+    with rep.trigger.on_custom_event(event_name="scatter_distractors"):
+        with rep.get.prims(path_pattern="/Replicator/Distractors/Distractor_[^/]+$"):
+            rep.randomizer.scatter_2d(surface_prims=[scatter_plane], check_for_collisions=False)
+            rep.modify.pose(rotation=rep.distribution.uniform((0, 0, 0), (0, 0, 360)))
+
+    # ── Render product at 1280×800 landscape ──────────────────────────
+    render_product = rep.create.render_product(camera, resolution=(1280, 800))
+    # Warm up renderer to compile RTX shaders and load textures
+    for _ in range(50):
+        simulation_app.update()
+
+    # Optimize by disabling continuous rendering
+    render_product.hydra_texture.set_updates_enabled(False)
+
+    # ── Writer attachment ─────────────────────────────────────────────
+    scene_output = os.path.abspath(f"{OUTPUT_DIR}_temp_scene_{scene_idx}")
+    print(f">>> Scene temp output: {scene_output}")
+
+    writer = rep.WriterRegistry.get("MultiModalRawWriter")
+    writer.initialize(output_dir=scene_output)
+    writer.attach([render_product])
+
+    simulation_app.update()
+
+    # ── Generation Loop for this scene ─────────────────────────────────────
+    print(f">>> Generating {frames_for_this_scene} frames...")
+    
+    num_distractors = len(clutter_prims)
+
+    for frame_i in range(frames_for_this_scene):
+        print(f">>>   Frame {frame_i + 1}/{frames_for_this_scene}")
+        
+        # Randomize materials
+        grey_tint = float(rng.generator.uniform(0.4, 0.7))
+        rep.functional.modify.attribute(cart_material, "inputs:diffuse_color_constant", (grey_tint, grey_tint, grey_tint))
+        rep.functional.modify.attribute(cart_material, "inputs:metallic_constant", float(rng.generator.uniform(0.7, 1.0)))
+        rep.functional.modify.attribute(cart_material, "inputs:reflection_roughness_constant", float(rng.generator.uniform(0.1, 0.45)))
+
+        box_color = BOX_COLORS[int(rng.generator.integers(0, len(BOX_COLORS)))]
+        rep.functional.modify.attribute(box_material, "inputs:diffuse_color_constant", tuple(float(c) for c in box_color))
+        rep.functional.modify.attribute(box_material, "inputs:reflection_roughness_constant", float(rng.generator.uniform(0.4, 0.9)))
+        
+        # Randomize lighting
+        rep.functional.modify.attribute(domelight, "inputs:intensity", float(rng.generator.uniform(100.0, 2500.0)))
+        rep.functional.modify.attribute(domelight, "inputs:color", tuple(float(c) for c in rng.generator.uniform((0.5, 0.5, 0.5), (1.0, 1.0, 1.0))))
+        rep.functional.modify.attribute(distantlight, "inputs:intensity", float(rng.generator.uniform(1000.0, 5000.0)))
+        rep.functional.modify.attribute(distantlight, "inputs:color", tuple(float(c) for c in rng.generator.uniform((0.6, 0.6, 0.6), (1.0, 1.0, 1.0))))
+        rep.functional.modify.pose(distantlight, rotation_value=tuple(float(r) for r in rng.generator.uniform((0, 0, 0), (360, 360, 360))))
+
+        # 1. Random cart selection
+        chosen_cart = CART_TYPES[int(rng.generator.integers(0, len(CART_TYPES)))]
+        
+        # 2. Box visibility (leanflow)
+        if chosen_cart == "leanflow":
+            num_boxes = int(rng.generator.integers(0, 4)) # 0 to 3 inclusive
+            visible_boxes_indices = rng.generator.choice(3, size=num_boxes, replace=False) if num_boxes > 0 else []
+        else:
+            visible_boxes_indices = []
+
+        # 3. Corridor-based Position and Yaw Selection
+        corridor_x = float(rng.generator.choice([-3.5, 0.0, 3.5]))
+        cx = corridor_x + float(rng.generator.uniform(-0.2, 0.2))
+        cy = float(rng.generator.uniform(-4.0, 4.0))
+        cyaw = float(rng.generator.choice([90.0, 270.0])) + float(rng.generator.uniform(-10.0, 10.0))
         cyaw_rad = math.radians(cyaw)
-
-        # 4. Camera position (polar offset from cart front-center origin)
-        d = random.uniform(1.0, 2.0)
-        alpha = random.uniform(-45.0, 45.0)
+        
+        # 4. Camera position
+        d = float(rng.generator.uniform(1.2, 1.8))
+        alpha = float(rng.generator.uniform(-15.0, 15.0))
         alpha_rad = math.radians(alpha)
-
+        
         local_x = d * math.cos(alpha_rad)
         local_y = d * math.sin(alpha_rad)
         wx = cx + local_x * math.cos(cyaw_rad) - local_y * math.sin(cyaw_rad)
         wy = cy + local_x * math.sin(cyaw_rad) + local_y * math.cos(cyaw_rad)
-        camera_positions.append((float(wx), float(wy), float(CAMERA_HEIGHT)))
-
-        # 5. Look-at target (front-center of cart with small de-centering offsets)
+        
         target_z = CAMERA_HEIGHT + d * math.tan(math.radians(TILT_ANGLE))
-        offset_x = random.uniform(-0.1, 0.1)
-        offset_y = random.uniform(-0.1, 0.1)
-        offset_z = random.uniform(-0.05, 0.05)
+        
+        # Trigger scatter distractor event
+        rep.utils.send_og_event(event_name="scatter_distractors")
 
-        tx = cx + offset_x * math.cos(cyaw_rad) - offset_y * math.sin(cyaw_rad)
-        ty = cy + offset_x * math.sin(cyaw_rad) + offset_y * math.cos(cyaw_rad)
-        look_at_positions.append((float(tx), float(ty), float(target_z + offset_z)))
-
-        # 6. Collision-free distractor positions
-        # Cart body center ≈ 0.8m behind front-center along cart's forward axis
-        body_cx = cx - CART_BODY_OFFSET * math.cos(cyaw_rad)
-        body_cy = cy - CART_BODY_OFFSET * math.sin(cyaw_rad)
-
-        placed_props = []
-        for j in range(num_distractors):
-            placed = False
-            for _ in range(100):
-                px = random.uniform(-5.0, 5.0)
-                py = random.uniform(-5.0, 5.0)
-
-                # Rule A: Line-of-sight clearance (camera <-> cart front)
-                if get_distance_to_segment((px, py), (wx, wy), (tx, ty)) < 0.6:
-                    continue
-                # Rule B: Cart body clearance
-                if math.sqrt((px - body_cx)**2 + (py - body_cy)**2) < CART_CLEARANCE:
-                    continue
-                # Rule C: Camera lens clearance
-                if math.sqrt((px - wx)**2 + (py - wy)**2) < 0.6:
-                    continue
-                # Rule D: Inter-distractor clearance
-                if any(math.sqrt((px - ox)**2 + (py - oy)**2) < 0.6 for ox, oy in placed_props):
-                    continue
-
-                clutter_positions[j].append((float(px), float(py), 0.0))
-                placed_props.append((px, py))
-                placed = True
-                break
-            if not placed:
-                clutter_positions[j].append((10.0 + j * 2.0, 10.0, 0.0))
-
-    # ── Setup Replicator Pipeline ─────────────────────────────────────────
-
-    with rep.new_layer():
-        # Load all 3 cart USD models simultaneously
-        cart_handles = {}
-        for ct in CART_TYPES:
-            cart_handles[ct] = rep.create.from_usd(CART_USD_PATHS[ct])
-            print(f">>> Loaded cart USD: {ct}")
-
-        simulation_app.update()
-        stage = omni.usd.get_context().get_stage()
-
-        # Apply per-class semantic labels to CartFrame prims only
-        # MIGRATION 6.0: Upgrade and apply new LabelsAPI
-        for class_name, cart_handle in cart_handles.items():
-            root_path = str(cart_handle.get_outputs()["prims"][0])
-            frame_prim = find_child_prim(stage, root_path, "CartFrame")
-            if frame_prim:
-                upgrade_prim_semantics_to_labels(frame_prim)
-                add_labels(frame_prim, labels=[class_name], instance_name="class")
-                print(f">>> Semantic '{class_name}' -> {frame_prim.GetPath()}")
+        # ── Apply everything ──────────────────────────────────────────────
+        # Carts
+        for ct, cart_path in cart_handles.items():
+            if ct == chosen_cart:
+                rep.functional.modify.pose(cart_path, position_value=(cx, cy, 0.0), rotation_value=(0.0, 0.0, cyaw))
+                rep.functional.modify.visibility(cart_path, True)
             else:
-                print(f"WARNING: CartFrame prim not found under {root_path}")
+                rep.functional.modify.pose(cart_path, position_value=(cx, cy, -1000.0), rotation_value=(0.0, 0.0, 0.0))
+                rep.functional.modify.visibility(cart_path, False)
 
-        # ── Metallic cart material (randomized grey tints) ────────────────
-        greys = [(float(g), float(g), float(g)) for g in np.linspace(0.4, 0.7, 50)]
-        cart_material = rep.create.material_omnipbr(
-            diffuse=rep.distribution.choice(greys),
-            metallic=rep.distribution.uniform(0.7, 1.0),
-            roughness=rep.distribution.uniform(0.1, 0.45),
-        )
-        cart_mat_path = Sdf.Path(str(cart_material.get_outputs()["prims"][0]))
-        cart_mat_shade = UsdShade.Material(stage.GetPrimAtPath(cart_mat_path))
+        # Boxes
+        for bi in range(3):
+            box_path = box_prims[f"Box_{bi}"]
+            rep.functional.modify.visibility(box_path, bool(bi in visible_boxes_indices))
 
-        # Bind metallic material: to root for picanol/colruyt, to CartFrame for leanflow
-        for class_name, cart_handle in cart_handles.items():
-            root_path = str(cart_handle.get_outputs()["prims"][0])
-            if class_name == "leanflow":
-                # Bind only to CartFrame (not to Box prims)
-                frame_prim = find_child_prim(stage, root_path, "CartFrame")
-                if frame_prim:
-                    api = UsdShade.MaterialBindingAPI.Apply(frame_prim)
-                    api.Bind(cart_mat_shade, bindingStrength=UsdShade.Tokens.strongerThanDescendants)
-                    print(f">>> Metallic material -> {frame_prim.GetPath()} (leanflow frame)")
-            else:
-                for prim_path in cart_handle.get_outputs()["prims"]:
-                    prim = stage.GetPrimAtPath(Sdf.Path(str(prim_path)))
-                    if prim:
-                        api = UsdShade.MaterialBindingAPI.Apply(prim)
-                        api.Bind(cart_mat_shade, bindingStrength=UsdShade.Tokens.strongerThanDescendants)
-                        print(f">>> Metallic material -> {prim.GetPath()}")
+        # Camera and Look At
+        rep.functional.modify.pose(look_at_target, position_value=(cx, cy, target_z))
+        rep.functional.modify.pose(camera_mount, position_value=(wx, wy, CAMERA_HEIGHT), look_at_value=look_at_target)
+        rep.functional.modify.pose(camera, rotation_value=(0, 0, -90)) # physical sensor rotation
 
-        # ── Box material (randomized solid colors) ────────────────────────
-        box_material = rep.create.material_omnipbr(
-            diffuse=rep.distribution.choice(BOX_COLORS),
-            roughness=rep.distribution.uniform(0.4, 0.9),
-            metallic=0.0,
-        )
-        box_mat_path = Sdf.Path(str(box_material.get_outputs()["prims"][0]))
-        box_mat_shade = UsdShade.Material(stage.GetPrimAtPath(box_mat_path))
 
-        # Find box prims in leanflow, bind material and get Replicator handles
-        leanflow_root = str(cart_handles["leanflow"].get_outputs()["prims"][0])
-        box_rep_handles = {}
-        for prim in Usd.PrimRange(stage.GetPrimAtPath(leanflow_root)):
-            prim_name = prim.GetName()
-            if prim_name in ["Box_0", "Box_1", "Box_2"]:
-                api = UsdShade.MaterialBindingAPI.Apply(prim)
-                api.Bind(box_mat_shade, bindingStrength=UsdShade.Tokens.strongerThanDescendants)
-                prim_path = str(prim.GetPath())
-                box_rep_handles[prim_name] = rep.get.prims(
-                    path_pattern=f"{prim_path}$", ignore_case=False
-                )
-                print(f">>> Box material + handle: {prim_path}")
 
-        # ── Renderer settings (force TAA, disable OptiX denoiser) ─────────
-        rep.settings.carb_settings("/rtx/indirectDiffuse/denoiser/enabled", True)
-        rep.settings.carb_settings("/rtx/reflections/denoiser/enabled", True)
-        rep.settings.carb_settings("/rtx/post/aa/op", 1)
-        rep.settings.carb_settings("/rtx/pathtracing/optixDenoiser/enabled", False)
-        rep.settings.carb_settings("/omni/replicator/RTSubframes", 4)
-
-        # ── Scene lighting ────────────────────────────────────────────────
-        domelight = rep.create.light(light_type="dome")
-        distantlight = rep.create.light(light_type="distant")
-
-        # ── Camera mount + camera hierarchy (with Stereo Noise) ───────────
-        camera_mount = rep.create.xform(name="camera_mount")
-        
-        # 1. Authoring: Create physical RtxCamera
-        cam_path = "/Replicator/camera_mount/StereoCamera"
-        rtx_cam = RtxCamera(
-            prim_path=cam_path,
-            focal_length=FOCAL_LENGTH,
-            horizontal_aperture=HORIZ_APERTURE,
-            clipping_range=(0.1, 10000.0)
-        )
-        
-        # 2. Runtime: Wrap in SingleViewDepthCameraSensor for stereo disparity/noise
-        stereo_sensor = SingleViewDepthCameraSensor(prim_path=cam_path)
-        
-        # 3. Configure D455 stereo baseline (95mm) and enable post-processing noise
-        rep.settings.carb_settings("/rtx/post/depthSensor/enabled", True)
-        rep.settings.carb_settings("/rtx/post/depthSensor/baseline", 0.095)
-        # 1 = Disparity mode, forcing stereo calculation failures on reflective materials
-        rep.settings.carb_settings("/rtx/post/depthSensor/rgbDepthOutputMode", 1) 
-        
-        # Replicator needs a handle to the camera prim
-        camera = rep.get.prims(path_pattern=cam_path)
-        
-        # Parent the camera under the mount
-        with camera_mount:
-            rep.modify.pose(look_at=None) # Ensure mount acts as parent
-
-        look_at_target = rep.create.xform(name="look_at_target")
-
-        # ── Warehouse clutter props (distractors, no semantics) ───────────
-        PROPS_BASE = f"{ISAAC_ASSETS}/Environments/Simple_Warehouse/Props"
-        prop_urls = [
-            f"{PROPS_BASE}/SM_PaletteA_01.usd",
-            f"{PROPS_BASE}/SM_CardBoxD_04.usd",
-            f"{PROPS_BASE}/S_TrafficCone.usd",
-        ]
-        clutter_prims = []
-        for url in prop_urls:
-            for _ in range(2):
-                clutter_prims.append(rep.create.from_usd(url))
-
-        # ── Frame Trigger ─────────────────────────────────────────────────
-        with rep.trigger.on_frame(max_execs=frames_for_this_scene):
-            # All 3 carts share the same pose sequence (only one visible per frame)
-            for ct in CART_TYPES:
-                with cart_handles[ct]:
-                    rep.modify.pose(
-                        position=rep.distribution.sequence(cart_positions),
-                        rotation=rep.distribution.sequence(cart_rotations),
-                    )
-
-            # Per-cart visibility
-            for ct in CART_TYPES:
-                with cart_handles[ct]:
-                    rep.modify.visibility(rep.distribution.sequence(visibility_seqs[ct]))
-
-            # Box visibility (leanflow boxes)
-            for box_name, box_handle in box_rep_handles.items():
-                with box_handle:
-                    rep.modify.visibility(rep.distribution.sequence(box_viz_seqs[box_name]))
-
-            # Camera mount: position + look-at aiming
-            with look_at_target:
-                rep.modify.pose(position=rep.distribution.sequence(look_at_positions))
-            with camera_mount:
-                rep.modify.pose(
-                    position=rep.distribution.sequence(camera_positions),
-                    look_at=look_at_target,
-                )
-            # Camera: static 90° roll for D455 physical sensor rotation
-            with camera:
-                rep.modify.pose(rotation=(0, 0, 90))
-
-            # Distractor placement
-            for j, clutter_prim in enumerate(clutter_prims):
-                with clutter_prim:
-                    rep.modify.pose(
-                        position=rep.distribution.sequence(clutter_positions[j]),
-                        rotation=rep.distribution.uniform((0, 0, 0), (0, 0, 360)),
-                    )
-
-            # Lighting randomization
-            with domelight:
-                rep.modify.attribute("inputs:intensity", rep.distribution.uniform(100.0, 2500.0))
-                rep.modify.attribute("inputs:color",
-                                     rep.distribution.uniform((0.5, 0.5, 0.5), (1.0, 1.0, 1.0)))
-            with distantlight:
-                rep.modify.attribute("inputs:intensity", rep.distribution.uniform(1000.0, 5000.0))
-                rep.modify.attribute("inputs:color",
-                                     rep.distribution.uniform((0.6, 0.6, 0.6), (1.0, 1.0, 1.0)))
-                rep.modify.pose(rotation=rep.distribution.uniform((0, 0, 0), (360, 360, 360)))
-
-        # ── Render product at 1280×800 landscape ──────────────────────────
-        render_product = rep.create.render_product(camera, resolution=(1280, 800))
-
-        # ── Writer attachment ─────────────────────────────────────────────
-        scene_output = os.path.abspath(f"{OUTPUT_DIR}_temp_scene_{scene_idx}")
-        print(f">>> Scene temp output: {scene_output}")
-
-        writer = rep.WriterRegistry.get("MultiModalRawWriter")
-        writer.initialize(output_dir=scene_output)
-        writer.attach([render_product])
-
-    # ── Run generation for this scene ─────────────────────────────────────
-    rep.orchestrator.set_capture_on_play(False)
-
-    for _ in range(5):
-        simulation_app.update()
-
-    print(f">>> Generating {frames_for_this_scene} frames...")
-    for frame_i in range(frames_for_this_scene):
-        print(f">>>   Frame {frame_i + 1}/{frames_for_this_scene}")
-        rep.orchestrator.step(rt_subframes=4, delta_time=0.0)
+        # Enable updates just for the capture to save GPU resources
+        render_product.hydra_texture.set_updates_enabled(True)
+        rep.orchestrator.step(rt_subframes=12, delta_time=0.0)
+        render_product.hydra_texture.set_updates_enabled(False)
 
     print(">>> Waiting for disk dispatch...")
     rep.orchestrator.wait_until_complete()
