@@ -1,7 +1,8 @@
-# generate_dataset.py
+# generate_dataset_6_0_1.py
 # Multi-class synthetic dataset generation using Omniverse Replicator
 # Generates YOLO26-seg training data with three cart types (picanol, colruyt, leanflow)
 # across multiple warehouse scenes with shuffled cross-scene consolidation.
+# Updated for Isaac Sim 6.0.1+ (Functional API & isaacsim namespace)
 
 import os
 import sys
@@ -41,29 +42,23 @@ if "--frames" in sys.argv:
         pass
 
 # ─── Start SimulationApp ──────────────────────────────────────────────────
-from omni.isaac.kit import SimulationApp
+# MIGRATION 6.0: omni.isaac.kit -> isaacsim
+from isaacsim import SimulationApp
 
 simulation_app = SimulationApp({"headless": True, "renderer": "RealTimePathTracing"})
 
-# Warp 1.15+ compatibility shim for Replicator
-import types
-try:
-    import warp
-    if not hasattr(warp, "context"):
-        context_module = types.ModuleType("warp.context")
-        context_module.Kernel = warp.Kernel
-        sys.modules["warp.context"] = context_module
-        warp.context = context_module
-        print(">>> Warp context compatibility shim applied.")
-except Exception as e:
-    print(f">>> Warp context check: {e}")
 
 # ─── Omniverse Imports ────────────────────────────────────────────────────
 import omni.usd
 import omni.replicator.core as rep
-from omni.isaac.core.utils.semantics import add_update_semantics
-from omni.isaac.core.utils.extensions import enable_extension
-from omni.isaac.core.utils.nucleus import get_assets_root_path
+
+# MIGRATION 6.0: omni.isaac.core.utils -> isaacsim.core.utils
+from isaacsim.core.utils.semantics import add_labels, upgrade_prim_semantics_to_labels
+from isaacsim.core.utils.extensions import enable_extension
+from isaacsim.core.utils.nucleus import get_assets_root_path
+
+from isaacsim.sensors.experimental.rtx import RtxCamera, SingleViewDepthCameraSensor
+
 from omni.replicator.core import Writer, WriterRegistry, AnnotatorRegistry
 from pxr import Sdf, UsdShade, Usd
 import numpy as np
@@ -331,62 +326,7 @@ def get_distance_to_segment(p, a, b):
     return math.sqrt((px - proj_x)**2 + (py - proj_y)**2)
 
 
-def consolidate_datasets(output_dir, num_scenes):
-    """Gather frames from all scene temp directories, shuffle deterministically,
-    and write to the final flat output directory for data leakage mitigation."""
-    os.makedirs(output_dir, exist_ok=True)
-    subdirs = ["rgb", "depth", "semantic", "semantic_labels", "bbox_3d", "camera"]
 
-    # 1. Gather all (scene_idx, local_frame_idx) pairs
-    all_frames = []
-    for scene_idx in range(num_scenes):
-        temp_dir = os.path.abspath(f"{output_dir}_temp_scene_{scene_idx}")
-        rgb_dir = os.path.join(temp_dir, "rgb")
-        if not os.path.exists(rgb_dir):
-            continue
-        for file in os.listdir(rgb_dir):
-            name, ext = os.path.splitext(file)
-            parts = name.split("_")
-            if len(parts) > 0 and parts[-1].isdigit():
-                all_frames.append((scene_idx, int(parts[-1])))
-
-    # 2. Deterministic shuffle so sequential splits are homogeneous across scenes
-    random.seed(42)
-    random.shuffle(all_frames)
-    print(f">>> Shuffled {len(all_frames)} frames across {num_scenes} scenes (seed=42)")
-
-    # 3. Move and rename files using the shuffled global index
-    for global_idx, (scene_idx, local_idx) in enumerate(all_frames):
-        temp_dir = os.path.abspath(f"{output_dir}_temp_scene_{scene_idx}")
-        prefix = f"frame_{local_idx:04d}"
-        for subdir in subdirs:
-            subdir_path = os.path.join(temp_dir, subdir)
-            if not os.path.exists(subdir_path):
-                continue
-            for file in os.listdir(subdir_path):
-                name, ext = os.path.splitext(file)
-                if name == prefix:
-                    new_name = f"frame_{global_idx:04d}{ext}"
-                elif name.startswith(prefix + "_"):
-                    suffix = name[len(prefix):]
-                    new_name = f"frame_{global_idx:04d}{suffix}{ext}"
-                else:
-                    continue
-                dest_dir = os.path.join(output_dir, subdir)
-                os.makedirs(dest_dir, exist_ok=True)
-                shutil.move(os.path.join(subdir_path, file), os.path.join(dest_dir, new_name))
-
-    # 4. Clean up temp directories
-    for scene_idx in range(num_scenes):
-        temp_dir = os.path.abspath(f"{output_dir}_temp_scene_{scene_idx}")
-        if os.path.exists(temp_dir):
-            try:
-                shutil.rmtree(temp_dir)
-                print(f">>> Cleaned up: {temp_dir}")
-            except Exception as e:
-                print(f"WARNING: Could not remove {temp_dir}: {e}")
-
-    print(f"\n>>> Consolidated {len(all_frames)} shuffled frames to {output_dir}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -531,11 +471,13 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
         stage = omni.usd.get_context().get_stage()
 
         # Apply per-class semantic labels to CartFrame prims only
+        # MIGRATION 6.0: Upgrade and apply new LabelsAPI
         for class_name, cart_handle in cart_handles.items():
             root_path = str(cart_handle.get_outputs()["prims"][0])
             frame_prim = find_child_prim(stage, root_path, "CartFrame")
             if frame_prim:
-                add_update_semantics(frame_prim, class_name, "class")
+                upgrade_prim_semantics_to_labels(frame_prim)
+                add_labels(frame_prim, labels=[class_name], instance_name="class")
                 print(f">>> Semantic '{class_name}' -> {frame_prim.GetPath()}")
             else:
                 print(f"WARNING: CartFrame prim not found under {root_path}")
@@ -602,16 +544,33 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
         domelight = rep.create.light(light_type="dome")
         distantlight = rep.create.light(light_type="distant")
 
-        # ── Camera mount + camera hierarchy ───────────────────────────────
-        # camera_mount receives position + look_at (global aim)
-        # camera child receives a static 90° roll (D455 physical sensor rotation)
+        # ── Camera mount + camera hierarchy (with Stereo Noise) ───────────
         camera_mount = rep.create.xform(name="camera_mount")
+        
+        # 1. Authoring: Create physical RtxCamera
+        cam_path = "/Replicator/camera_mount/StereoCamera"
+        rtx_cam = RtxCamera(
+            prim_path=cam_path,
+            focal_length=FOCAL_LENGTH,
+            horizontal_aperture=HORIZ_APERTURE,
+            clipping_range=(0.1, 10000.0)
+        )
+        
+        # 2. Runtime: Wrap in SingleViewDepthCameraSensor for stereo disparity/noise
+        stereo_sensor = SingleViewDepthCameraSensor(prim_path=cam_path)
+        
+        # 3. Configure D455 stereo baseline (95mm) and enable post-processing noise
+        rep.settings.carb_settings("/rtx/post/depthSensor/enabled", True)
+        rep.settings.carb_settings("/rtx/post/depthSensor/baseline", 0.095)
+        # 1 = Disparity mode, forcing stereo calculation failures on reflective materials
+        rep.settings.carb_settings("/rtx/post/depthSensor/rgbDepthOutputMode", 1) 
+        
+        # Replicator needs a handle to the camera prim
+        camera = rep.get.prims(path_pattern=cam_path)
+        
+        # Parent the camera under the mount
         with camera_mount:
-            camera = rep.create.camera(
-                focal_length=FOCAL_LENGTH,
-                horizontal_aperture=HORIZ_APERTURE,
-                clipping_range=(0.1, 10000.0),
-            )
+            rep.modify.pose(look_at=None) # Ensure mount acts as parent
 
         look_at_target = rep.create.xform(name="look_at_target")
 
@@ -637,7 +596,7 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
                         rotation=rep.distribution.sequence(cart_rotations),
                     )
 
-            # Per-cart visibility (individual with-blocks to avoid squashing bug)
+            # Per-cart visibility
             for ct in CART_TYPES:
                 with cart_handles[ct]:
                     rep.modify.visibility(rep.distribution.sequence(visibility_seqs[ct]))
@@ -707,9 +666,6 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
     render_product.destroy()
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Consolidate shuffled dataset and clean up
-# ═══════════════════════════════════════════════════════════════════════════
-
-consolidate_datasets(OUTPUT_DIR, num_scenes)
+print(f"\n>>> Generation complete. Temp scenes are in {OUTPUT_DIR}_temp_scene_*")
+print(">>> Run `python consolidate_dataset.py` to merge and shuffle them.")
 simulation_app.close()
