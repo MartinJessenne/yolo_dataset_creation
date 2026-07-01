@@ -63,13 +63,15 @@ simulation_app = SimulationApp({"headless": True, "renderer": "RayTracedLighting
 # ─── Omniverse Imports ────────────────────────────────────────────────────
 import omni.usd
 import omni.replicator.core as rep
+import omni.client
+
+# Set omni.client log level to ERROR to suppress warning spam
+omni.client.set_log_level(omni.client.LogLevel.ERROR)
 
 # MIGRATION 6.0: omni.isaac.core.utils -> isaacsim.core.utils
 from isaacsim.core.experimental.utils.semantics import add_labels, upgrade_prim_semantics_to_labels
-from isaacsim.core.utils.extensions import enable_extension
 from isaacsim.storage.native import get_assets_root_path
-
-from isaacsim.sensors.experimental.rtx import RtxCamera, SingleViewDepthCameraSensor
+import isaacsim.core.utils.prims as prim_utils
 
 from omni.replicator.core import Writer, WriterRegistry, AnnotatorRegistry
 from pxr import Sdf, UsdShade, Usd, UsdGeom, Gf
@@ -526,30 +528,21 @@ spherelight = rep.functional.create.sphere_light(
     parent="/Replicator/Lights"
 )
 
-# ── Camera Setup (with Stereo Noise) ───────────
+# ── Camera Setup (RealSense D455 USD Integration) ───────────
 camera_mount = rep.functional.create.xform(name="camera_mount", parent="/Replicator")
 look_at_target = rep.functional.create.xform(name="look_at_target", parent="/Replicator")
 
-cam_path = "/Replicator/camera_mount/StereoCamera"
-rtx_cam = RtxCamera(
-    path=cam_path,
-)
+d455_usd_path = f"{assets_root}/Isaac/Sensors/RealSense/D455/rsd455.usd"
+prim_path = "/Replicator/camera_mount/RealSense_D455"
+print(f"Spawning official RealSense D455 USD from: {d455_usd_path}")
+prim_utils.create_prim(prim_path=prim_path, usd_path=d455_usd_path)
 
-rtx_cam.camera.set_focal_lengths([FOCAL_LENGTH])
-rtx_cam.camera.set_apertures(horizontal_apertures=[HORIZ_APERTURE])
-rtx_cam.camera.set_clipping_ranges(near_distances=[0.1], far_distances=[10000.0])
+# Wait for reference to load and renderer to initialize
+for _ in range(50):
+    simulation_app.update()
 
-stereo_sensor = SingleViewDepthCameraSensor(
-    path=rtx_cam,
-    resolution=(800, 1280),
-    annotators=["distance_to_image_plane"]
-)
-
-rep.settings.carb_settings("/rtx/post/depthSensor/enabled", True)
-rep.settings.carb_settings("/rtx/post/depthSensor/baseline", 0.095)
-rep.settings.carb_settings("/rtx/post/depthSensor/rgbDepthOutputMode", 0) 
-
-camera = stage.GetPrimAtPath(cam_path)
+rgb_camera_path = "/Replicator/camera_mount/RealSense_D455/RSD455/Camera_OmniVision_OV9782_Color"
+camera = stage.GetPrimAtPath(rgb_camera_path)
 
 # ── Warehouse clutter props (distractors, no semantics) ───────────
 PROPS_BASE = f"{ISAAC_ASSETS}/Environments/Simple_Warehouse/Props"
@@ -568,15 +561,38 @@ for idx, url in enumerate(prop_urls):
             name=f"Distractor_{idx}_{sub_idx}"
         ))
 
-# ── Reuse Stereo Sensor's Render Product ──────────────────────────
-render_product = stereo_sensor._hydra_texture
+# ── Create the Render Product ──────────────────────────────────────
+print(f"Creating render product for camera: {rgb_camera_path} at 1280x800")
+render_product = rep.create.render_product(rgb_camera_path, resolution=(1280, 800))
+
 # Warm up renderer to compile RTX shaders and load textures
 for _ in range(50):
     simulation_app.update()
 
 # Writer instantiation and attachment (will initialize directories in the loop)
 writer = rep.WriterRegistry.get("MultiModalRawWriter")
-writer.attach([render_product])
+writer.attach([render_product.path])
+
+# Enable the ROS2 bridge extension programmatically
+from isaacsim.core.utils.extensions import enable_extension
+enable_extension("isaacsim.ros2.bridge")
+
+# ── Initialize the ROS2 Bridge and link the synchronized streams ────
+rgb_writer = rep.writers.get("LdrColorSDROS2PublishImage")
+rgb_writer.initialize(
+    topicName="camera/color/image_raw",
+    frameId="camera_color_optical_frame",
+    nodeNamespace=""
+)
+rgb_writer.attach([render_product.path])
+
+depth_writer = rep.writers.get("DistanceToImagePlaneSDROS2PublishImage")
+depth_writer.initialize(
+    topicName="camera/aligned_depth_to_color/image_raw",
+    frameId="camera_color_optical_frame",
+    nodeNamespace=""
+)
+depth_writer.attach([render_product.path])
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -714,7 +730,7 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
         UsdGeom.XformCommonAPI(mount_prim).SetTranslate((wx, wy, CAMERA_HEIGHT))
         UsdGeom.XformCommonAPI(mount_prim).SetRotate((angles[0], angles[1], angles[2]))
         
-        cam_prim = stage.GetPrimAtPath("/Replicator/camera_mount/StereoCamera")
+        cam_prim = stage.GetPrimAtPath("/Replicator/camera_mount/RealSense_D455")
         UsdGeom.XformCommonAPI(cam_prim).SetRotate((0.0, 0.0, -90.0)) # physical sensor rotation
 
         # Local SphereLight illumination (positioned above the physical cart center)
@@ -769,8 +785,10 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
     print(">>> Waiting for disk dispatch...")
     rep.orchestrator.wait_until_complete()
 
-# Clean up render product and writer at the end
+# Clean up render product and writers at the end
 writer.detach()
+rgb_writer.detach()
+depth_writer.detach()
 render_product.destroy()
 
 print(f"\n>>> Generation complete. Temp scenes are in {OUTPUT_DIR}_temp_scene_*")
