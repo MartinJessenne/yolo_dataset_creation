@@ -132,6 +132,13 @@ WAREHOUSE_SCENES = [
 # Intrinsics target: f_pixel = 639.99768 px on 1280 px width.
 CAMERA_HEIGHT = 0.304       # meters (URDF base_link -> camera_link Z offset)
 TILT_ANGLE = 30.0           # degrees
+CAMERA_ROLL_DEG = -90.0     # roll about the optical axis (physically rotated D455, portrait mount)
+
+# DepthSensorDistance (SingleViewDepthCameraSensor) outputs RealSense-style depth units of
+# 100 um, not meters: validated against distance_to_image_plane on this D455 config
+# (median ratio 9.99e3 vs meters, pixel correlation 0.998). Converted before writing so
+# depth/ and the ground-truth fallback share the same unit (meters).
+DEPTH_SENSOR_UNIT_M = 1.0e-4
 HORIZ_APERTURE = 20.955     # mm (standard sensor aperture)
 FOCAL_LENGTH = 639.99768 * HORIZ_APERTURE / 1280  # ≈ 10.4775 mm
 
@@ -164,14 +171,18 @@ class MultiModalRawWriter(Writer):
 
         # Register annotators
         # NOTE: depth is captured separately by DepthSensorWriter (see below), driven by
-        # SingleViewDepthCameraSensor's noisy depth_sensor_distance annotator instead of the
-        # ground-truth distance_to_image_plane annotator, to better match real D455 sim2real noise.
-        self.annotators.append(AnnotatorRegistry.get_annotator("rgb"))
-        self.annotators.append(AnnotatorRegistry.get_annotator(
-            "semantic_segmentation", init_params={"colorize": False}
-        ))
-        self.annotators.append(AnnotatorRegistry.get_annotator("bounding_box_3d"))
-        self.annotators.append(AnnotatorRegistry.get_annotator("camera_params"))
+        # SingleViewDepthCameraSensor's noisy depth annotator instead of the ground-truth
+        # distance_to_image_plane annotator, to better match real D455 sim2real noise.
+        # Assign (not append): Writer.initialize() re-runs __init__ on the same instance,
+        # so appending would duplicate annotators on every per-scene re-initialization.
+        self.annotators = [
+            AnnotatorRegistry.get_annotator("rgb"),
+            AnnotatorRegistry.get_annotator(
+                "semantic_segmentation", init_params={"colorize": False}
+            ),
+            AnnotatorRegistry.get_annotator("bounding_box_3d"),
+            AnnotatorRegistry.get_annotator("camera_params"),
+        ]
 
     def initialize(self, output_dir: str, **kwargs):
         self._output_dir = output_dir
@@ -269,6 +280,11 @@ class MultiModalRawWriter(Writer):
                 prim_path = prim_paths[i] if i < len(prim_paths) else ""
 
                 if class_name in CLASS_MAPPING and prim_path.startswith("/Replicator"):
+                    # Skip carts hidden by teleporting below the floor (z = -1000); their
+                    # visibility stays 'inherited' so they still appear in bbox_3d output.
+                    transform = box.get("transform")
+                    if transform is not None and len(transform) == 4 and transform[3][2] < -100.0:
+                        continue
                     box_copy = box.copy()
                     box_copy["semanticId"] = CLASS_MAPPING[class_name]
                     final_data.append(box_copy)
@@ -330,8 +346,15 @@ class DepthSensorWriter(Writer):
     def __init__(self, output_dir: str = None, **kwargs):
         super().__init__()
         self._frame_id = 0
-        self.annotators.append(AnnotatorRegistry.get_annotator("depth_sensor_distance"))
-        self.annotators.append(AnnotatorRegistry.get_annotator("distance_to_image_plane"))
+        # "depth_sensor_distance" is SingleViewDepthCameraSensor's friendly alias, not a
+        # Replicator registry name -- the registry entry is the raw render var
+        # "DepthSensorDistance". It must be fetched on the host (cpu): the GPU buffer node
+        # logs "corrupted input renderVar" every frame for DepthSensor* vars (see
+        # isaacsim.sensors.experimental.rtx camera_sensor.py _CPU_ANNOTATORS).
+        self.annotators = [
+            AnnotatorRegistry.get_annotator("DepthSensorDistance", device="cpu"),
+            AnnotatorRegistry.get_annotator("distance_to_image_plane"),
+        ]
 
     def initialize(self, output_dir: str, **kwargs):
         self._output_dir = output_dir
@@ -359,15 +382,27 @@ class DepthSensorWriter(Writer):
 
         noisy_depth = gt_depth = None
         for key in data.keys():
-            if key.startswith("depth_sensor_distance"):
+            if key.startswith("DepthSensorDistance") or key.startswith("depth_sensor_distance"):
                 noisy_depth = data[key]
             elif key.startswith("distance_to_image_plane"):
                 gt_depth = data[key]
+
+        noisy_depth = self._normalize_depth(noisy_depth)
+        gt_depth = self._normalize_depth(gt_depth)
 
         if gt_depth is not None:
             np.save(os.path.join(self.depth_gt_diag_dir, f"{frame_tag}.npy"), gt_depth)
 
         if noisy_depth is not None:
+            noisy_depth = noisy_depth * DEPTH_SENSOR_UNIT_M  # 100 um units -> meters
+            if gt_depth is not None:
+                valid = (noisy_depth > 0) & (gt_depth > 0)
+                if valid.any():
+                    ratio = float(np.median(noisy_depth[valid] / gt_depth[valid]))
+                    if not 0.5 < ratio < 2.0:
+                        print(f">>> WARNING: noisy/gt depth median ratio {ratio:.3f} for "
+                              f"{frame_tag} -- DEPTH_SENSOR_UNIT_M may be wrong for this "
+                              f"sensor config; depth/ units are suspect.", flush=True)
             np.save(os.path.join(self.depth_dir, f"{frame_tag}.npy"), noisy_depth)
         elif gt_depth is not None:
             print(f">>> WARNING: depth_sensor_distance produced no data for {frame_tag}; "
@@ -380,6 +415,31 @@ class DepthSensorWriter(Writer):
                   f"(both depth_sensor_distance and distance_to_image_plane were empty).", flush=True)
 
         self._frame_id += 1
+
+    @staticmethod
+    def _normalize_depth(payload):
+        """Coerce annotator payloads (dict-with-data, warp/flat buffers) to a (H, W) float32
+        numpy array; returns None for missing/empty data so the fallback logic can react."""
+        if payload is None:
+            return None
+        if isinstance(payload, dict):
+            payload = payload.get("data")
+            if payload is None:
+                return None
+        if hasattr(payload, "numpy"):  # warp array
+            payload = payload.numpy()
+        arr = np.asarray(payload)
+        if arr.size == 0:
+            return None
+        if arr.ndim == 1:
+            # Raw render var arrives flat; recover the known render resolution (800x1280)
+            if arr.size % 1280 == 0:
+                arr = arr.reshape(-1, 1280)
+            else:
+                return None
+        elif arr.ndim == 3 and arr.shape[-1] == 1:
+            arr = arr[:, :, 0]
+        return arr.astype(np.float32, copy=False)
 
 
 WriterRegistry.register(DepthSensorWriter)
@@ -458,8 +518,18 @@ stage = omni.usd.get_context().get_stage()
 # Define the environment group scope to load warehouses as references
 env_prim = stage.DefinePrim("/World/Environment", "Xform")
 
-# Seed the randomizer to make sampling reproducible
-rng = rep.rng.ReplicatorRNG(seed=42)
+# Seed the randomizer to make sampling reproducible. NOTE: rep.rng.ReplicatorRNG resets its
+# generator back to the seeded state whenever it receives Replicator's "initialize"
+# orchestrator event -- which arrives with a one-frame lag after the first step() call, so
+# it lands mid-loop and silently re-plays frame 0's random draws on frame 1 (duplicate
+# frames). A plain seeded numpy Generator isn't coupled to orchestrator events, so it just
+# advances normally; wrapped in a tiny shim so the `rng.generator.<dist>(...)` call sites
+# below don't need to change.
+class _PlainRNG:
+    def __init__(self, seed):
+        self.generator = np.random.default_rng(seed)
+
+rng = _PlainRNG(seed=42)
 
 # Set Replicator to require explicit step() calls to capture
 rep.orchestrator.set_capture_on_play(False)
@@ -618,6 +688,20 @@ for _ in range(50):
 rgb_camera_path = "/Replicator/camera_mount/RealSense_D455/RSD455/Camera_OmniVision_OV9782_Color"
 camera = stage.GetPrimAtPath(rgb_camera_path)
 
+# The D455 asset's cameras look along the asset's +X axis with image-up +Z (robotics
+# convention), not along the USD-camera -Z. Rather than hardcode that offset, measure the
+# color camera's rest orientation while the mount is identity, and solve the mount rotation
+# from it each frame (mount_rot = rest_rot^-1 * desired_camera_rot, row-vector convention).
+mount_prim = stage.GetPrimAtPath("/Replicator/camera_mount")
+_mount_xform = UsdGeom.Xformable(mount_prim)
+_mount_xform.ClearXformOpOrder()
+mount_matrix_op = _mount_xform.MakeMatrixXform()
+_cam_rest = UsdGeom.Xformable(camera).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+_cam_rest_rot = _cam_rest.ExtractRotationMatrix().GetOrthonormalized()
+CAM_REST_ROT_INV = Gf.Matrix4d().SetRotate(_cam_rest_rot.ExtractRotation()).GetInverse()
+print(f">>> D455 color camera rest optical axis (world, mount=identity): "
+      f"{[round(v, 4) for v in _cam_rest.TransformDir(Gf.Vec3d(0, 0, -1))]}")
+
 # ── Warehouse clutter props (distractors, no semantics) ───────────
 PROPS_BASE = f"{ISAAC_ASSETS}/Environments/Simple_Warehouse/Props"
 prop_urls = [
@@ -643,30 +727,55 @@ render_product = rep.create.render_product(rgb_camera_path, resolution=(1280, 80
 for _ in range(50):
     simulation_app.update()
 
-# Writer instantiation and attachment (will initialize directories in the loop)
+# Writer instantiation only. WriterRegistry.get() creates the writer via __new__ WITHOUT
+# running __init__, so the annotator list is empty until initialize() runs -- attaching here
+# would build a writer graph with no annotators and silently produce empty frames.
+# initialize() + attach() happen per scene inside the generation loop instead.
 writer = rep.WriterRegistry.get("MultiModalRawWriter")
-writer.attach([render_product.path])
 
 # ── Depth Sensor Setup (SingleViewDepthCameraSensor: noisy, sim2real-realistic depth) ──
 # Wraps the RGB camera prim itself, so depth comes out already registered to the RGB
 # view/resolution (single-view depth estimation, no separate baseline reprojection needed).
-# UNVERIFIED until tested on GPU: whether RtxCamera can wrap an already-loaded prim by path
-# (vs. only create+load fresh via RtxCamera.create()), whether the shipped rsd455.usd carries
-# the embedded OmniSensorDepthSensorSingleViewAPI baseline/focal-length config this sensor
-# expects to auto-detect, and the resolution tuple's axis order. If this raises or produces
-# garbage on the first --frames 2 test run, DepthSensorWriter still falls back to ground-truth
-# distance_to_image_plane (see its _write_impl) so the run isn't a total loss.
+# resolution follows the OpenCV/NumPy convention (height, width), i.e. 800x1280 landscape.
 depth_rtx_camera = RtxCamera(rgb_camera_path)
 depth_sensor = SingleViewDepthCameraSensor(
     depth_rtx_camera,
-    resolution=(1280, 800),
+    resolution=(800, 1280),
     annotators=["depth_sensor_distance"],
 )
 depth_sensor.set_enabled_post_processing(True)
-depth_render_product = depth_sensor.render_product
+# NOTE: depth_sensor.render_product is a pxr.UsdRender.Product (USD schema wrapper over the
+# already-created hydra texture prim), unlike rep.create.render_product's return value above
+# (a Replicator handle with a plain .path string) -- use GetPath() here instead of .path.
+depth_render_product_path = str(depth_sensor.render_product.GetPath())
 
+# The sensor's own asset-template auto-detection (_populate_from_asset_template) is a no-op
+# when wrapping an existing prim by path (only works via RtxCamera.create(usd_path=...)), so
+# replicate it here: find a RenderProduct with OmniSensorDepthSensorSingleViewAPI embedded in
+# the loaded rsd455.usd and copy its omni:rtx:post:depthSensor:* config (baseline, noise, ...)
+# onto our render product. Best-effort -- defaults are used if the asset carries no template.
+_d455_root = stage.GetPrimAtPath("/Replicator/camera_mount/RealSense_D455")
+_template_found = False
+if _d455_root and _d455_root.IsValid():
+    for _p in Usd.PrimRange(_d455_root):
+        if _p.GetTypeName() == "RenderProduct" and _p.HasAPI("OmniSensorDepthSensorSingleViewAPI"):
+            _dst = stage.GetPrimAtPath(depth_render_product_path)
+            _copied = 0
+            for _attr in _p.GetAttributes():
+                _name = _attr.GetName()
+                if _name.startswith("omni:rtx:post:depthSensor:") and _name != "omni:rtx:post:depthSensor:enabled":
+                    if _dst.HasAttribute(_name) and _attr.Get() is not None:
+                        _dst.GetAttribute(_name).Set(_attr.Get())
+                        _copied += 1
+            print(f">>> Copied {_copied} depth sensor template attrs from {_p.GetPath()}")
+            _template_found = True
+            break
+if not _template_found:
+    print(">>> No OmniSensorDepthSensorSingleViewAPI template found in rsd455.usd; "
+          "using SingleViewDepthCameraSensor defaults for baseline/noise.")
+
+# Instantiation only -- initialize() + attach() happen per scene (see note on writer above).
 depth_writer = rep.WriterRegistry.get("DepthSensorWriter")
-depth_writer.attach([depth_render_product.path])
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -692,11 +801,15 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
     for _ in range(100):
         simulation_app.update()
 
-    # Re-initialize writer output folder for this scene
+    # Re-initialize writer output folder for this scene, then attach. initialize() must
+    # precede attach(): it runs __init__ (via Writer.initialize) which populates the
+    # annotator list the attach-time writer graph is built from.
     scene_output = os.path.abspath(f"{OUTPUT_DIR}_temp_scene_{scene_idx}")
     print(f">>> Scene temp output: {scene_output}")
     writer.initialize(output_dir=scene_output)
     depth_writer.initialize(output_dir=scene_output)
+    writer.attach([render_product.path])
+    depth_writer.attach([depth_render_product_path])
 
     # ── Generation Loop for this scene ─────────────────────────────────────
     print(f">>> Generating {frames_for_this_scene} frames...")
@@ -704,7 +817,7 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
 
     for frame_i in range(frames_for_this_scene):
         print(f">>>   Frame {frame_i + 1}/{frames_for_this_scene}")
-        
+
         # Randomize materials
         grey_tint = float(rng.generator.uniform(0.4, 0.7))
         rep.functional.modify.attribute(cart_material, "inputs:diffuse_color_constant", (grey_tint, grey_tint, grey_tint))
@@ -759,21 +872,24 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
         # Camera height is physically fixed on the robot at CAMERA_HEIGHT = 0.304m
         # Camera inclination is physically fixed at TILT_ANGLE = 30.0 degrees upward
         target_z = CAMERA_HEIGHT + d * math.tan(math.radians(TILT_ANGLE))
-        
+
         # ── Apply everything via USD Stage API ──────────────────────────────
         # Carts
         for ct, cart_path in cart_handles.items():
             prim_path = get_path_str(cart_path)
             cart_prim = stage.GetPrimAtPath(prim_path)
             xform = UsdGeom.XformCommonAPI(cart_prim)
+            # Hide non-chosen carts by teleporting far below the floor instead of toggling
+            # visibility: prims switched invisible->visible drop out of the semantic instance
+            # mapping and render as UNLABELLED. Teleported carts stay in bounding_box_3d
+            # output, so the writer filters boxes at z < -100 (see _write_impl).
             if ct == chosen_cart:
                 xform.SetTranslate((cx, cy, 0.0))
                 xform.SetRotate((0.0, 0.0, cyaw))
-                cart_prim.GetAttribute("visibility").Set("inherited")
             else:
                 xform.SetTranslate((cx, cy, -1000.0))
                 xform.SetRotate((0.0, 0.0, 0.0))
-                cart_prim.GetAttribute("visibility").Set("invisible")
+            cart_prim.GetAttribute("visibility").Set("inherited")
 
         # Boxes
         for bi in range(3):
@@ -790,23 +906,22 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
         # Camera and Look At target translations and rotation calculation
         target_prim = stage.GetPrimAtPath("/Replicator/look_at_target")
         UsdGeom.XformCommonAPI(target_prim).SetTranslate((cx, cy, target_z))
-        
-        # Compute look-at using pxr.Gf
+
+        # Aim the D455: desired camera orientation puts the optical axis (-Z, USD camera
+        # convention) on the eye->target ray, then rolls CAMERA_ROLL_DEG about the optical
+        # axis (physically rotated sensor). The mount matrix compensates for the camera's
+        # rest orientation inside the asset (measured at setup as CAM_REST_ROT_INV).
         eye = Gf.Vec3d(wx, wy, CAMERA_HEIGHT)
         target = Gf.Vec3d(cx, cy, target_z)
-        up = Gf.Vec3d(0.0, 0.0, 1.0)
-        
-        lookat_mat = Gf.Matrix4d().SetLookAt(eye, target, up)
-        cam_to_world = lookat_mat.GetInverse()
-        rot = cam_to_world.ExtractRotation()
-        angles = rot.Decompose(Gf.Vec3d(1.0, 0.0, 0.0), Gf.Vec3d(0.0, 1.0, 0.0), Gf.Vec3d(0.0, 0.0, 1.0))
-        
-        mount_prim = stage.GetPrimAtPath("/Replicator/camera_mount")
-        UsdGeom.XformCommonAPI(mount_prim).SetTranslate((wx, wy, CAMERA_HEIGHT))
-        UsdGeom.XformCommonAPI(mount_prim).SetRotate((angles[0], angles[1], angles[2]))
-        
-        cam_prim = stage.GetPrimAtPath("/Replicator/camera_mount/RealSense_D455")
-        UsdGeom.XformCommonAPI(cam_prim).SetRotate((0.0, 0.0, -90.0)) # physical sensor rotation
+        cam_to_world = Gf.Matrix4d().SetLookAt(eye, target, Gf.Vec3d(0.0, 0.0, 1.0)).GetInverse()
+        lookat_rot = Gf.Matrix4d().SetRotate(
+            cam_to_world.ExtractRotationMatrix().GetOrthonormalized().ExtractRotation()
+        )
+        roll = Gf.Matrix4d().SetRotate(Gf.Rotation(Gf.Vec3d(0.0, 0.0, 1.0), CAMERA_ROLL_DEG))
+        desired_cam_rot = roll * lookat_rot
+        mount_mat = CAM_REST_ROT_INV * desired_cam_rot
+        mount_mat.SetTranslateOnly(eye)
+        mount_matrix_op.Set(mount_mat)
 
         # Local SphereLight illumination (positioned above the physical cart center)
         cy_actual = cy - 1.214 * math.sin(cyaw_rad)
@@ -854,18 +969,27 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
                 xform.SetTranslate((10.0 + j * 2.0, 10.0, -1000.0))
                 xform.SetRotate((0.0, 0.0, 0.0))
 
+        # Flush this frame's USD edits to the renderer before capturing: without an app
+        # update, edits reach the render one step late (first frame duplicated, per-frame
+        # data trailing the randomization by one, last frame never rendered).
+        simulation_app.update()
+
         # Capture frame (hydra texture updates stay enabled)
         rep.orchestrator.step(rt_subframes=12, delta_time=0.0)
 
     print(">>> Waiting for disk dispatch...")
     rep.orchestrator.wait_until_complete()
 
-# Clean up render products and writers at the end
+    # Detach per scene; the next scene re-initializes and re-attaches with fresh output dirs.
+    writer.detach()
+    depth_writer.detach()
+
+# Clean up render products at the end (writers are detached per scene above)
+# NOTE: depth_sensor's underlying hydra texture is torn down by SingleViewDepthCameraSensor's
+# own __del__ (there's no UsdRender.Product.destroy() to call -- see depth_render_product_path
+# above), so only the RGB render_product needs an explicit .destroy() here.
 for name, cleanup in [
-    ("writer", writer.detach),
-    ("depth_writer", depth_writer.detach),
     ("render_product", render_product.destroy),
-    ("depth_render_product", depth_render_product.destroy),
 ]:
     try:
         cleanup()
