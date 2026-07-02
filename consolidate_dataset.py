@@ -10,7 +10,11 @@ def consolidate_datasets(output_dir, num_scenes):
     
     print(f"\n>>> Starting consolidation for dataset at: {output_dir}")
     os.makedirs(output_dir, exist_ok=True)
-    subdirs = ["rgb", "depth", "semantic", "semantic_labels", "bbox_3d", "camera"]
+    # depth_ground_truth_diagnostic is a temporary side-by-side comparison capture from
+    # DepthSensorWriter (see generate_dataset_6_0_1.py) - included here so it survives
+    # consolidation instead of being deleted with the temp scene dirs.
+    subdirs = ["rgb", "depth", "semantic", "semantic_labels", "bbox_3d", "camera",
+               "depth_ground_truth_diagnostic"]
 
     # 1. Gather all (scene_idx, local_frame_idx) pairs
     all_frames = []

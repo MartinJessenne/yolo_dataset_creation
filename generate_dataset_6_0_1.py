@@ -69,9 +69,13 @@ import omni.client
 omni.client.set_log_level(omni.client.LogLevel.ERROR)
 
 # MIGRATION 6.0: omni.isaac.core.utils -> isaacsim.core.utils
-from isaacsim.core.experimental.utils.semantics import add_labels, upgrade_prim_semantics_to_labels
+try:
+    from isaacsim.core.experimental.utils.semantics import add_labels, upgrade_prim_semantics_to_labels
+except ImportError:
+    from isaacsim.core.utils.semantics import add_labels, upgrade_prim_semantics_to_labels
 from isaacsim.storage.native import get_assets_root_path
 import isaacsim.core.utils.prims as prim_utils
+from isaacsim.sensors.experimental.rtx import RtxCamera, SingleViewDepthCameraSensor
 
 from omni.replicator.core import Writer, WriterRegistry, AnnotatorRegistry
 from pxr import Sdf, UsdShade, Usd, UsdGeom, Gf
@@ -109,8 +113,12 @@ for name, path in CART_USD_PATHS.items():
 
 # Warehouse environments for scene diversity
 assets_root = get_assets_root_path()
-ISAAC_ASSETS = f"{assets_root}/Isaac" if assets_root else \
-    "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.5/Isaac"
+if not assets_root:
+    print("\nERROR: get_assets_root_path() returned None. Cannot resolve Isaac assets "
+          "(warehouse scenes, D455 sensor USD). Check Nucleus/asset server connectivity.")
+    simulation_app.close()
+    exit(1)
+ISAAC_ASSETS = f"{assets_root}/Isaac"
 
 WAREHOUSE_SCENES = [
     f"{ISAAC_ASSETS}/Environments/Simple_Warehouse/warehouse.usd",
@@ -155,11 +163,13 @@ class MultiModalRawWriter(Writer):
         self._frame_id = 0
 
         # Register annotators
+        # NOTE: depth is captured separately by DepthSensorWriter (see below), driven by
+        # SingleViewDepthCameraSensor's noisy depth_sensor_distance annotator instead of the
+        # ground-truth distance_to_image_plane annotator, to better match real D455 sim2real noise.
         self.annotators.append(AnnotatorRegistry.get_annotator("rgb"))
         self.annotators.append(AnnotatorRegistry.get_annotator(
             "semantic_segmentation", init_params={"colorize": False}
         ))
-        self.annotators.append(AnnotatorRegistry.get_annotator("distance_to_image_plane"))
         self.annotators.append(AnnotatorRegistry.get_annotator("bounding_box_3d"))
         self.annotators.append(AnnotatorRegistry.get_annotator("camera_params"))
 
@@ -168,13 +178,12 @@ class MultiModalRawWriter(Writer):
         self._frame_id = 0
 
         self.rgb_dir = os.path.join(output_dir, "rgb")
-        self.depth_dir = os.path.join(output_dir, "depth")
         self.sem_dir = os.path.join(output_dir, "semantic")
         self.sem_labels_dir = os.path.join(output_dir, "semantic_labels")
         self.bbox_3d_dir = os.path.join(output_dir, "bbox_3d")
         self.cam_dir = os.path.join(output_dir, "camera")
 
-        for d in [self.rgb_dir, self.depth_dir, self.sem_dir,
+        for d in [self.rgb_dir, self.sem_dir,
                   self.sem_labels_dir, self.bbox_3d_dir, self.cam_dir]:
             os.makedirs(d, exist_ok=True)
 
@@ -194,14 +203,12 @@ class MultiModalRawWriter(Writer):
         frame_tag = f"frame_{self._frame_id:04d}"
 
         # Dispatch annotator data by key prefix
-        rgb_data = depth_data = sem_data = bbox3d_data = camera_data = None
+        rgb_data = sem_data = bbox3d_data = camera_data = None
         for key in data.keys():
             if key.startswith("rgb"):
                 rgb_data = data[key]
             elif key.startswith("semantic_segmentation"):
                 sem_data = data[key]
-            elif key.startswith("distance_to_image_plane"):
-                depth_data = data[key]
             elif key.startswith("bounding_box_3d"):
                 bbox3d_data = data[key]
             elif key.startswith("camera_params"):
@@ -211,10 +218,6 @@ class MultiModalRawWriter(Writer):
         if rgb_data is not None:
             img = Image.fromarray(rgb_data, "RGBA")
             img.save(os.path.join(self.rgb_dir, f"{frame_tag}.png"))
-
-        # ── Depth ──────────────────────────────────────────────────────────
-        if depth_data is not None:
-            np.save(os.path.join(self.depth_dir, f"{frame_tag}.npy"), depth_data)
 
         # ── Semantic Segmentation (cart-only filtered mask) ────────────────
         if sem_data is not None:
@@ -313,6 +316,73 @@ class MultiModalRawWriter(Writer):
             return obj
 
 WriterRegistry.register(MultiModalRawWriter)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Custom Writer: DepthSensorWriter (native depth, registered to the RGB view)
+# ═══════════════════════════════════════════════════════════════════════════
+# Captures the noisy, sim2real-realistic "depth_sensor_distance" annotator driven by
+# SingleViewDepthCameraSensor. Also captures the ground-truth "distance_to_image_plane"
+# annotator side-by-side into a diagnostic folder, since the depth_sensor_distance wiring
+# for the D455 is unverified until tested on a rented GPU. Drop the diagnostic capture
+# (and the fallback below) once depth_sensor_distance is confirmed to produce sane output.
+class DepthSensorWriter(Writer):
+    def __init__(self, output_dir: str = None, **kwargs):
+        super().__init__()
+        self._frame_id = 0
+        self.annotators.append(AnnotatorRegistry.get_annotator("depth_sensor_distance"))
+        self.annotators.append(AnnotatorRegistry.get_annotator("distance_to_image_plane"))
+
+    def initialize(self, output_dir: str, **kwargs):
+        self._output_dir = output_dir
+        self._frame_id = 0
+
+        self.depth_dir = os.path.join(output_dir, "depth")
+        self.depth_gt_diag_dir = os.path.join(output_dir, "depth_ground_truth_diagnostic")
+
+        for d in [self.depth_dir, self.depth_gt_diag_dir]:
+            os.makedirs(d, exist_ok=True)
+
+        super().initialize(output_dir=output_dir, **kwargs)
+
+    def write(self, data):
+        try:
+            self._write_impl(data)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f">>> Exception in DepthSensorWriter.write: {e}", flush=True)
+            raise e
+
+    def _write_impl(self, data):
+        frame_tag = f"frame_{self._frame_id:04d}"
+
+        noisy_depth = gt_depth = None
+        for key in data.keys():
+            if key.startswith("depth_sensor_distance"):
+                noisy_depth = data[key]
+            elif key.startswith("distance_to_image_plane"):
+                gt_depth = data[key]
+
+        if gt_depth is not None:
+            np.save(os.path.join(self.depth_gt_diag_dir, f"{frame_tag}.npy"), gt_depth)
+
+        if noisy_depth is not None:
+            np.save(os.path.join(self.depth_dir, f"{frame_tag}.npy"), noisy_depth)
+        elif gt_depth is not None:
+            print(f">>> WARNING: depth_sensor_distance produced no data for {frame_tag}; "
+                  f"falling back to ground-truth distance_to_image_plane in depth/. "
+                  f"Verify SingleViewDepthCameraSensor wiring before trusting this dataset "
+                  f"for sim2real noise realism.", flush=True)
+            np.save(os.path.join(self.depth_dir, f"{frame_tag}.npy"), gt_depth)
+        else:
+            print(f">>> ERROR: no depth data at all for {frame_tag} "
+                  f"(both depth_sensor_distance and distance_to_image_plane were empty).", flush=True)
+
+        self._frame_id += 1
+
+
+WriterRegistry.register(DepthSensorWriter)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -441,7 +511,11 @@ for class_name, cart_prim_path in cart_handles.items():
         add_labels(frame_prim, labels=[class_name], taxonomy="class")
         print(f">>> Semantic '{class_name}' -> {frame_prim.GetPath()}")
     else:
-        print(f"WARNING: CartFrame prim not found under {cart_prim_path}")
+        print(f"\nERROR: CartFrame prim not found under {cart_prim_path}. "
+              f"'{class_name}' would be generated with no semantic label, silently "
+              f"corrupting the dataset. Aborting instead of continuing.")
+        simulation_app.close()
+        exit(1)
 
 # ── Materials Setup ───────────────────────────────────────────────────
 rep.functional.create.scope(name="Materials", parent="/Replicator")
@@ -573,26 +647,26 @@ for _ in range(50):
 writer = rep.WriterRegistry.get("MultiModalRawWriter")
 writer.attach([render_product.path])
 
-# Enable the ROS2 bridge extension programmatically
-from isaacsim.core.utils.extensions import enable_extension
-enable_extension("isaacsim.ros2.bridge")
-
-# ── Initialize the ROS2 Bridge and link the synchronized streams ────
-rgb_writer = rep.writers.get("LdrColorSDROS2PublishImage")
-rgb_writer.initialize(
-    topicName="camera/color/image_raw",
-    frameId="camera_color_optical_frame",
-    nodeNamespace=""
+# ── Depth Sensor Setup (SingleViewDepthCameraSensor: noisy, sim2real-realistic depth) ──
+# Wraps the RGB camera prim itself, so depth comes out already registered to the RGB
+# view/resolution (single-view depth estimation, no separate baseline reprojection needed).
+# UNVERIFIED until tested on GPU: whether RtxCamera can wrap an already-loaded prim by path
+# (vs. only create+load fresh via RtxCamera.create()), whether the shipped rsd455.usd carries
+# the embedded OmniSensorDepthSensorSingleViewAPI baseline/focal-length config this sensor
+# expects to auto-detect, and the resolution tuple's axis order. If this raises or produces
+# garbage on the first --frames 2 test run, DepthSensorWriter still falls back to ground-truth
+# distance_to_image_plane (see its _write_impl) so the run isn't a total loss.
+depth_rtx_camera = RtxCamera(rgb_camera_path)
+depth_sensor = SingleViewDepthCameraSensor(
+    depth_rtx_camera,
+    resolution=(1280, 800),
+    annotators=["depth_sensor_distance"],
 )
-rgb_writer.attach([render_product.path])
+depth_sensor.set_enabled_post_processing(True)
+depth_render_product = depth_sensor.render_product
 
-depth_writer = rep.writers.get("DistanceToImagePlaneSDROS2PublishImage")
-depth_writer.initialize(
-    topicName="camera/aligned_depth_to_color/image_raw",
-    frameId="camera_color_optical_frame",
-    nodeNamespace=""
-)
-depth_writer.attach([render_product.path])
+depth_writer = rep.WriterRegistry.get("DepthSensorWriter")
+depth_writer.attach([depth_render_product.path])
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -622,6 +696,7 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
     scene_output = os.path.abspath(f"{OUTPUT_DIR}_temp_scene_{scene_idx}")
     print(f">>> Scene temp output: {scene_output}")
     writer.initialize(output_dir=scene_output)
+    depth_writer.initialize(output_dir=scene_output)
 
     # ── Generation Loop for this scene ─────────────────────────────────────
     print(f">>> Generating {frames_for_this_scene} frames...")
@@ -785,11 +860,17 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
     print(">>> Waiting for disk dispatch...")
     rep.orchestrator.wait_until_complete()
 
-# Clean up render product and writers at the end
-writer.detach()
-rgb_writer.detach()
-depth_writer.detach()
-render_product.destroy()
+# Clean up render products and writers at the end
+for name, cleanup in [
+    ("writer", writer.detach),
+    ("depth_writer", depth_writer.detach),
+    ("render_product", render_product.destroy),
+    ("depth_render_product", depth_render_product.destroy),
+]:
+    try:
+        cleanup()
+    except Exception as e:
+        print(f">>> WARNING: cleanup of {name} failed (likely never attached): {e}", flush=True)
 
 print(f"\n>>> Generation complete. Temp scenes are in {OUTPUT_DIR}_temp_scene_*")
 print(">>> Starting shuffled consolidation...")
