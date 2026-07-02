@@ -41,7 +41,7 @@ def consolidate_datasets(output_dir, num_scenes):
     # 3. Move and rename files using the shuffled global index
     for global_idx, (scene_idx, local_idx) in enumerate(all_frames):
         temp_dir = os.path.abspath(f"{output_dir}_temp_scene_{scene_idx}")
-        prefix = f"frame_{local_idx:04d}"
+        prefix = f"frame_{local_idx:06d}"
         for subdir in subdirs:
             subdir_path = os.path.join(temp_dir, subdir)
             if not os.path.exists(subdir_path):
@@ -49,10 +49,10 @@ def consolidate_datasets(output_dir, num_scenes):
             for file in os.listdir(subdir_path):
                 name, ext = os.path.splitext(file)
                 if name == prefix:
-                    new_name = f"frame_{global_idx:04d}{ext}"
+                    new_name = f"frame_{global_idx:06d}{ext}"
                 elif name.startswith(prefix + "_"):
                     suffix = name[len(prefix):]
-                    new_name = f"frame_{global_idx:04d}{suffix}{ext}"
+                    new_name = f"frame_{global_idx:06d}{suffix}{ext}"
                 else:
                     continue
                 dest_dir = os.path.join(output_dir, subdir)

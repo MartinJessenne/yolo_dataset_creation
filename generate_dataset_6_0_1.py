@@ -187,6 +187,7 @@ class MultiModalRawWriter(Writer):
     def initialize(self, output_dir: str, **kwargs):
         self._output_dir = output_dir
         self._frame_id = 0
+        self._skipped_frames = 0
 
         self.rgb_dir = os.path.join(output_dir, "rgb")
         self.sem_dir = os.path.join(output_dir, "semantic")
@@ -211,7 +212,7 @@ class MultiModalRawWriter(Writer):
             raise e
 
     def _write_impl(self, data):
-        frame_tag = f"frame_{self._frame_id:04d}"
+        frame_tag = f"frame_{self._frame_id:06d}"
 
         # Dispatch annotator data by key prefix
         rgb_data = sem_data = bbox3d_data = camera_data = None
@@ -225,12 +226,10 @@ class MultiModalRawWriter(Writer):
             elif key.startswith("camera_params"):
                 camera_data = data[key]
 
-        # ── RGB ────────────────────────────────────────────────────────────
-        if rgb_data is not None:
-            img = Image.fromarray(rgb_data, "RGBA")
-            img.save(os.path.join(self.rgb_dir, f"{frame_tag}.png"))
-
         # ── Semantic Segmentation (cart-only filtered mask) ────────────────
+        # Computed before any disk writes: this frame is only kept if it has
+        # a visible cart, so RGB/bbox/camera decisions below depend on it.
+        colored = filtered_labels = None
         if sem_data is not None:
             raw_ids = np.asarray(sem_data["data"])
             if raw_ids.ndim == 3:
@@ -252,19 +251,14 @@ class MultiModalRawWriter(Writer):
                 mask = raw_ids == sem_id
                 colored[mask] = [r, g, b, 255]
 
-            sem_img = Image.fromarray(colored, "RGBA")
-            sem_img.save(os.path.join(self.sem_dir, f"{frame_tag}.png"))
-
-            # Save filtered idToLabels (only cart classes, remapped to CLASS_MAPPING IDs)
+            # Filtered idToLabels (only cart classes, remapped to CLASS_MAPPING IDs)
             filtered_labels = {}
             for class_name in set(cart_id_map.values()):
                 mapped_id = CLASS_MAPPING[class_name]
                 filtered_labels[str(mapped_id)] = {"class": class_name}
 
-            with open(os.path.join(self.sem_labels_dir, f"{frame_tag}.json"), "w") as f:
-                json.dump(filtered_labels, f, indent=4)
-
         # ── 3D Bounding Boxes (multi-class filtered) ──────────────────────
+        filtered_bbox = None
         if bbox3d_data is not None:
             serializable_bbox = self._make_serializable(bbox3d_data)
             id_to_labels = serializable_bbox.get("info", {}).get("idToLabels", {})
@@ -287,6 +281,7 @@ class MultiModalRawWriter(Writer):
                         continue
                     box_copy = box.copy()
                     box_copy["semanticId"] = CLASS_MAPPING[class_name]
+                    box_copy["className"] = class_name
                     final_data.append(box_copy)
                     new_prim_paths.append(prim_path)
 
@@ -300,8 +295,39 @@ class MultiModalRawWriter(Writer):
                 }
             }
 
-            with open(os.path.join(self.bbox_3d_dir, f"{frame_tag}.json"), "w") as f:
-                json.dump(filtered_bbox, f, indent=4)
+        # ── Unlabeled-frame guard ────────────────────────────────────────
+        # A frame is only usable if the chosen cart both (a) has a bbox_3d entry
+        # (its origin is within the camera frustum) and (b) is actually visible in
+        # the rendered mask (not fully occluded by a distractor or clipped out).
+        # Isaac Sim's bounding_box_3d annotator only returns entries for objects at
+        # least partially in-frustum, so at close range (camera-to-cart distance can
+        # now go down to 0.5m) or extreme approach angles, the chosen cart can end up
+        # with zero pixels or no box at all -- skip writing anything for that frame
+        # rather than shipping an unlabeled positive into the training set.
+        has_bbox = bool(filtered_bbox is not None and filtered_bbox["data"])
+        has_mask_pixels = bool(colored is not None and colored[:, :, 3].any())
+        if not (has_bbox and has_mask_pixels):
+            self._skipped_frames += 1
+            print(f">>> Skipping {frame_tag}: no visible cart in frame "
+                  f"(has_bbox={has_bbox}, has_mask_pixels={has_mask_pixels})", flush=True)
+            self._frame_id += 1
+            return
+
+        # ── RGB ────────────────────────────────────────────────────────────
+        if rgb_data is not None:
+            img = Image.fromarray(rgb_data, "RGBA")
+            img.save(os.path.join(self.rgb_dir, f"{frame_tag}.png"))
+
+        # ── Semantic Segmentation (write) ───────────────────────────────────
+        sem_img = Image.fromarray(colored, "RGBA")
+        sem_img.save(os.path.join(self.sem_dir, f"{frame_tag}.png"))
+
+        with open(os.path.join(self.sem_labels_dir, f"{frame_tag}.json"), "w") as f:
+            json.dump(filtered_labels, f, indent=4)
+
+        # ── 3D Bounding Boxes (write) ────────────────────────────────────
+        with open(os.path.join(self.bbox_3d_dir, f"{frame_tag}.json"), "w") as f:
+            json.dump(filtered_bbox, f, indent=4)
 
         # ── Camera Parameters ─────────────────────────────────────────────
         if camera_data is not None:
@@ -378,7 +404,7 @@ class DepthSensorWriter(Writer):
             raise e
 
     def _write_impl(self, data):
-        frame_tag = f"frame_{self._frame_id:04d}"
+        frame_tag = f"frame_{self._frame_id:06d}"
 
         noisy_depth = gt_depth = None
         for key in data.keys():
@@ -647,7 +673,7 @@ rep.settings.carb_settings("/rtx/indirectDiffuse/denoiser/enabled", True)
 rep.settings.carb_settings("/rtx/reflections/denoiser/enabled", True)
 rep.settings.carb_settings("/rtx/post/aa/op", 1)
 rep.settings.carb_settings("/rtx/pathtracing/optixDenoiser/enabled", False)
-rep.settings.carb_settings("/omni/replicator/RTSubframes", 12)
+rep.settings.carb_settings("/omni/replicator/RTSubframes", 6)
 
 # ── Scene lighting ────────────────────────────────────────────────
 rep.functional.create.scope(name="Lights", parent="/Replicator")
@@ -858,9 +884,9 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
         cyaw_rad = math.radians(cyaw)
         
         # 4. Camera position (robot approaches cart in a 2D horizontal yaw cone)
-        # Distance d is from the front-center of the cart (1.0m to 3.0m)
+        # Distance d is from the front-center of the cart (0.8m to 3.0m)
         # Horizontal deviation alpha is in [-45.0, 45.0] degrees
-        d = float(rng.generator.uniform(1.0, 3.0))
+        d = float(rng.generator.uniform(0.8, 3.0))
         alpha = float(rng.generator.uniform(-45.0, 45.0))
         alpha_rad = math.radians(alpha)
         
@@ -975,10 +1001,14 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
         simulation_app.update()
 
         # Capture frame (hydra texture updates stay enabled)
-        rep.orchestrator.step(rt_subframes=12, delta_time=0.0)
+        rep.orchestrator.step(rt_subframes=6, delta_time=0.0)
 
     print(">>> Waiting for disk dispatch...")
     rep.orchestrator.wait_until_complete()
+
+    written = writer._frame_id - writer._skipped_frames
+    print(f">>> Scene {scene_idx + 1}: wrote {written}/{writer._frame_id} frames with a "
+          f"visible cart ({writer._skipped_frames} skipped as unlabeled)")
 
     # Detach per scene; the next scene re-initializes and re-attaches with fresh output dirs.
     writer.detach()

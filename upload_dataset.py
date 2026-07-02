@@ -16,6 +16,8 @@ dataset_dir = os.path.abspath(sys.argv[1])
 features = Features({
     "rgb": Image(),
     "depth": Value("binary"),                          # Raw float32 depth map array bytes
+    "depth_resolution": Sequence(Value("int32"), length=2),  # (height, width) of the depth array;
+                                                               # not assumed equal to camera_resolution
     "semantic": Image(),                               # Colorized semantic segmentation map PNG
     
     # Decoded semantic labels RGBA-to-class color map (stored as raw JSON string per frame)
@@ -37,6 +39,7 @@ features = Features({
     "bbox_3d_z_max": Sequence(Value("float32")),
     "bbox_3d_transform": Sequence(Sequence(Value("float32"), length=16)), # List of flat 4x4 matrices
     "bbox_3d_semantic_id": Sequence(Value("int32")),
+    "bbox_3d_class_name": Sequence(Value("string")),   # e.g. "picanol"/"colruyt"/"leanflow" per box
     "bbox_3d_occlusion": Sequence(Value("float32"))
 })
 
@@ -64,8 +67,12 @@ def generator(path):
         bbox_file = os.path.join(bbox_dir, f"{frame}.json")
         cam_file = os.path.join(cam_dir, f"{frame}.json")
 
-        # 2. Serialize raw depth array to bytes
-        depth_bytes = np.load(depth_file).tobytes()
+        # 2. Serialize raw depth array to bytes, keeping its actual shape -- not assumed
+        #    equal to camera_resolution (they coincide today only because of the single-view
+        #    depth sensor design; don't bake that coincidence into the schema).
+        depth_arr = np.load(depth_file)
+        depth_bytes = depth_arr.tobytes()
+        depth_resolution = list(depth_arr.shape)
 
         # 3. Read semantic labels map as a raw JSON string
         with open(sem_labels_file, "r") as f:
@@ -89,8 +96,9 @@ def generator(path):
         x_max, y_max, z_max = [], [], []
         transforms = []
         semantic_ids = []
+        class_names = []
         occlusions = []
-        
+
         for box in bbox_data.get("data", []):
             x_min.append(box["x_min"])
             y_min.append(box["y_min"])
@@ -102,11 +110,14 @@ def generator(path):
             flat_transform = [val for row in box["transform"] for val in row]
             transforms.append(flat_transform)
             semantic_ids.append(box["semanticId"])
+            # .get() with a fallback: older generator output predates this field
+            class_names.append(box.get("className", ""))
             occlusions.append(box["occlusionRatio"])
 
         yield {
             "rgb": rgb_file,
             "depth": depth_bytes,
+            "depth_resolution": depth_resolution,
             "semantic": sem_file,
             "semantic_labels": sem_labels_str,
             "camera_aperture": aperture,
@@ -122,6 +133,7 @@ def generator(path):
             "bbox_3d_z_max": z_max,
             "bbox_3d_transform": transforms,
             "bbox_3d_semantic_id": semantic_ids,
+            "bbox_3d_class_name": class_names,
             "bbox_3d_occlusion": occlusions
         }
 
