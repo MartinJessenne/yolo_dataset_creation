@@ -225,17 +225,19 @@ def main():
     for split, split_frames_list in splits.items():
         if not split_frames_list:
             continue
-        ds = Dataset.from_generator(
-            generator,
-            gen_kwargs={"path": dataset_dir, "frames": split_frames_list},
-            features=FEATURES,
-        )
-        n_shards = max(1, -(-len(ds) // ROWS_PER_SHARD))
+        n_shards = max(1, -(-len(split_frames_list) // ROWS_PER_SHARD))
         for i in range(n_shards):
-            shard = ds.shard(num_shards=n_shards, index=i, contiguous=True)
+            chunk = split_frames_list[i * ROWS_PER_SHARD:(i + 1) * ROWS_PER_SHARD]
+            # One shard at a time, held in memory. Dataset.from_generator would
+            # first materialise the whole split as an uncompressed Arrow cache --
+            # depth alone is 4.1 MB per frame raw against ~3.3 MB for an entire
+            # frame in parquet -- which overruns the disk on a split this size.
+            ds = Dataset.from_list(list(generator(dataset_dir, chunk)),
+                                   features=FEATURES)
             fname = f"{split}-{args.tag}-{i:05d}-of-{n_shards:05d}.parquet"
             local_path = os.path.join(args.staging, fname)
-            shard.to_parquet(local_path)
+            ds.to_parquet(local_path)
+            del ds
 
             rows = verify_parquet(local_path, fname)
             size_mb = os.path.getsize(local_path) / 1e6
