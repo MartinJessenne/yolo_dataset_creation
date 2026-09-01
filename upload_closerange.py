@@ -202,6 +202,8 @@ def main():
     ap.add_argument("--staging", default="./_parquet_closerange")
     ap.add_argument("--dry-run", action="store_true",
                     help="build and verify shards locally, upload nothing")
+    ap.add_argument("--max-gb", type=float, default=35.0,
+                    help="refuse to commit if the built shards exceed this budget")
     args = ap.parse_args()
 
     dataset_dir = os.path.abspath(args.dataset_dir)
@@ -245,7 +247,11 @@ def main():
                          f"overwrite. Change --tag or delete it deliberately first.")
             written.append((repo_path, local_path))
 
-    print(f"\nlocal gate passed for {len(written)} shards")
+    total_gb = sum(os.path.getsize(l) for _, l in written) / 1e9
+    print(f"\nlocal gate passed for {len(written)} shards, {total_gb:.2f} GB total")
+    if total_gb > args.max_gb:
+        sys.exit(f"ABORT: {total_gb:.2f} GB exceeds the {args.max_gb:.0f} GB budget. "
+                 f"Nothing uploaded. Re-run on a frame subset or raise --max-gb.")
     if args.dry_run:
         print("dry run: nothing uploaded")
         return
