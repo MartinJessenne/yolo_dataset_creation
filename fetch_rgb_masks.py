@@ -2,8 +2,9 @@
 
 Le parquet est colonnaire : ne selectionner que rgb, semantic et semantic_labels
 fait que les plages d'octets de la colonne depth ne sont jamais demandees au
-serveur. Sur ce dataset depth pese ~2.4 MB par frame contre ~0.9 MB pour
-rgb + semantic, donc le trafic tombe de ~82 GB a ~22 GB.
+serveur. Mesure sur un shard : rgb + semantic pesent 1.29 MB par frame contre
+3.3 MB pour une ligne complete, donc les 24705 frames des deux plages
+representent ~32 GB au lieu des 82 GB du depot entier.
 
 Le travail est fait shard par shard et marque par un fichier .done : une
 interruption reseau reprend ou elle s'est arretee au lieu de tout refaire.
