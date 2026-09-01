@@ -88,7 +88,7 @@ def main():
         img_dir = os.path.join(args.out, split_dir)
         msk_dir = os.path.join(args.out, "_masks", split_dir)
 
-        reader = con.execute(QUERY.format(repo=REPO, path=path)).fetch_record_batch(64)
+        reader = con.execute(QUERY.format(repo=REPO, path=path)).to_arrow_reader(64)
         rows = 0
         written = 0
         for batch in reader:
