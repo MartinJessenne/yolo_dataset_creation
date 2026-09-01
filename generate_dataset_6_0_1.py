@@ -31,7 +31,10 @@ sys.argv.append("--/log/fileLogLevel=verbose")
 sys.argv.append("--/rtx/rendermode=RayTracedLighting")
 
 # ─── Parse CLI Arguments ───────────────────────────────────────────────────
-NUM_FRAMES = 5  # default for validation runs
+# A frame costs 3.43 MB once written to parquet (measured over rgb + depth + masks
+# + metadata), so 10000 frames is ~34 GB, sized against the 35 GB Hub budget for
+# this batch. Raw on-disk cost before upload is 9.2 MB/frame.
+NUM_FRAMES = 10000
 if "--frames" in sys.argv:
     try:
         idx = sys.argv.index("--frames")
