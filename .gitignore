@@ -4,7 +4,12 @@ __pycache__/
 *.pyc
 .uv/
 
-_output_dataset_multi_cart
-
-
-_output_dataset_picanol
+# Tout ce que produisent la generation, le rapatriement et l'entrainement reste
+# local : ces repertoires se comptent en dizaines de gigaoctets et leur source
+# de verite est le depot Hugging Face, pas git.
+_output_dataset*
+_parquet_*
+_rfdetr_dataset/
+_preview/
+output/
+*.log
