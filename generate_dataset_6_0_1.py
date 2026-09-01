@@ -102,6 +102,21 @@ SEMANTIC_COLORS = {
     2: (50, 100, 220),   # leanflow - blue
 }
 
+# Core MDL material library.
+# Replicator resolves an MDL asset through the USD asset resolver, and the bare name
+# "OmniPBR.mdl" does not resolve here: Neuray receives an empty module name and
+# GetSubIdentifiersForAsset raises. The core library ships inside the Kit runtime, so
+# the absolute path is resolved once and passed to every create.material() call.
+ISAAC_PATH = os.environ.get("ISAAC_PATH", "/isaac-sim")
+OMNIPBR_MDL = os.path.join(ISAAC_PATH, "kit", "mdl", "core", "Base", "OmniPBR.mdl")
+
+if not os.path.exists(OMNIPBR_MDL):
+    print(f"\nERROR: core MDL library not found at {OMNIPBR_MDL}. Set ISAAC_PATH or "
+          f"correct OMNIPBR_MDL; a bare 'OmniPBR.mdl' does not resolve.")
+    simulation_app.close()
+    exit(1)
+print(f">>> Verified MDL: {OMNIPBR_MDL}")
+
 # Verify all USD assets exist
 for name, path in CART_USD_PATHS.items():
     if not os.path.exists(path):
@@ -157,7 +172,7 @@ BOX_COLORS = [
 ]
 
 # Output directory
-OUTPUT_DIR = os.path.abspath("./_output_dataset_multi_cart")
+OUTPUT_DIR = os.path.abspath("./_output_dataset_closerange")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -296,17 +311,19 @@ class MultiModalRawWriter(Writer):
             }
 
         # ── Unlabeled-frame guard ────────────────────────────────────────
-        # A frame is only usable if the chosen cart both (a) has a bbox_3d entry
-        # (its origin is within the camera frustum) and (b) is actually visible in
-        # the rendered mask (not fully occluded by a distractor or clipped out).
-        # Isaac Sim's bounding_box_3d annotator only returns entries for objects at
-        # least partially in-frustum, so at close range (camera-to-cart distance can
-        # now go down to 0.5m) or extreme approach angles, the chosen cart can end up
-        # with zero pixels or no box at all -- skip writing anything for that frame
-        # rather than shipping an unlabeled positive into the training set.
+        # A frame is usable exactly when the chosen cart occupies pixels in the
+        # rendered mask. The mask IS the label: semantic_labels/ carries the class
+        # (built from the segmentation annotator's own idToLabels, not from any
+        # box), so mask pixels alone make a complete segmentation training sample.
+        #
+        # bbox_3d is NOT part of this test. Isaac's bounding_box_3d annotator drops
+        # objects near the frustum edge, which is the normal condition at close
+        # range, and gating on it would discard fully-labelled close-range frames.
+        # has_bbox is still computed and logged so the skip line reports how often
+        # the 3D box survives at a given range.
         has_bbox = bool(filtered_bbox is not None and filtered_bbox["data"])
         has_mask_pixels = bool(colored is not None and colored[:, :, 3].any())
-        if not (has_bbox and has_mask_pixels):
+        if not has_mask_pixels:
             self._skipped_frames += 1
             print(f">>> Skipping {frame_tag}: no visible cart in frame "
                   f"(has_bbox={has_bbox}, has_mask_pixels={has_mask_pixels})", flush=True)
@@ -618,7 +635,7 @@ rep.functional.create.scope(name="Materials", parent="/Replicator")
 
 # Metallic Cart Material
 cart_material = rep.functional.create.material(
-    mdl="OmniPBR.mdl",
+    mdl=OMNIPBR_MDL,
     diffuse_color_constant=(0.5, 0.5, 0.5), # Will be randomized below
     metallic_constant=0.85,
     reflection_roughness_constant=0.25,
@@ -628,7 +645,7 @@ cart_material = rep.functional.create.material(
 
 # Box Material
 box_material = rep.functional.create.material(
-    mdl="OmniPBR.mdl",
+    mdl=OMNIPBR_MDL,
     diffuse_color_constant=(0.5, 0.5, 0.5), # Will be randomized below
     metallic_constant=0.0,
     reflection_roughness_constant=0.6,
@@ -884,9 +901,16 @@ for scene_idx, warehouse_url in enumerate(WAREHOUSE_SCENES):
         cyaw_rad = math.radians(cyaw)
         
         # 4. Camera position (robot approaches cart in a 2D horizontal yaw cone)
-        # Distance d is from the front-center of the cart (0.8m to 3.0m)
+        # Distance d is measured in the ground plane from the cart's front-centre,
+        # with the camera at CAMERA_HEIGHT, so the true camera-to-front-face range
+        # is sqrt(d^2 + 0.304^2): d = 0.20 is 0.36 m, d = 0.80 is 0.86 m.
+        # 0.80 is the lower limit of the far dataset this batch extends, so the two
+        # meet without overlapping.
+        # This batch supervises the RGB detector. Below d = 0.42 the true range falls
+        # under the D455 Min-Z of 0.52 m at 1280x800, so depth carries no real-sensor
+        # counterpart there; RGB and mask supervision stay valid across the whole range.
         # Horizontal deviation alpha is in [-45.0, 45.0] degrees
-        d = float(rng.generator.uniform(0.8, 3.0))
+        d = float(rng.generator.uniform(0.20, 0.80))
         alpha = float(rng.generator.uniform(-45.0, 45.0))
         alpha_rad = math.radians(alpha)
         
